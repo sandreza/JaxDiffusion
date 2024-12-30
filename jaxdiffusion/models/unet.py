@@ -231,6 +231,7 @@ class UNet(eqx.Module):
 
     def __init__(
         self,
+        *,
         data_shape: tuple[int, int, int],
         is_biggan: bool,
         dim_mults: list[int],
@@ -239,7 +240,6 @@ class UNet(eqx.Module):
         dim_head: int,
         num_res_blocks: int,
         attn_resolutions: list[int],
-        *,
         key,
     ):
         keys = jax.random.split(key, 7)
