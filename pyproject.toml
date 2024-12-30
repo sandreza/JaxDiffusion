@@ -1,0 +1,25 @@
+[project]
+name = "jaxdiffusion"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "diffrax>=0.6.1",
+    "einops>=0.8.0",
+    "equinox>=0.11.10",
+    "h5py>=3.12.1",
+    "ipython>=8.18.1",
+    "jax[cuda12-pip]>=0.4.30",
+    "jaxlib>=0.4.30",
+    "matplotlib>=3.9.4",
+    "numpy>=2.0.2",
+    "optax>=0.2.4",
+    "pandas>=2.2.3",
+    "seaborn>=0.13.2",
+    "tensorflow-probability>=0.25.0",
+    "torch>=2.5.1",
+    "torchaudio>=2.5.1",
+    "torchvision>=0.20.1",
+    "tqdm>=4.67.1",
+]
