@@ -1,3 +1,7 @@
+import json
+import equinox as eqx
+import jax.random as jr
+
 def save(filename, hyperparams, model):
     with open(filename, "wb") as f:
         hyperparam_str = json.dumps(hyperparams)

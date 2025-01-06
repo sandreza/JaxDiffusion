@@ -1,7 +1,29 @@
+import array
+import functools as ft
+import gzip
+import os
+import struct
+import urllib.request
+
+import diffrax as dfx  # https://github.com/patrick-kidger/diffrax
+import einops  # https://github.com/arogozhnikov/einops
+import equinox as eqx
+import jax
+import jax.numpy as jnp
+import jax.random as jr
+import matplotlib.pyplot as plt
+import optax  # https://github.com/deepmind/optax
+
+from jaxdiffusion.models.unet import UNet
+from jaxdiffusion.losses.score_matching_loss import make_step, single_loss_fn
+from jaxdiffusion.process.diffusion import VarExpBrownianMotion, ReverseProcess
+from jaxdiffusion.models.save_and_load import save, load
+
 def mnist():
     filename = "train-images-idx3-ubyte.gz"
     url_dir = "https://storage.googleapis.com/cvdf-datasets/mnist"
-    target_dir = os.getcwd() + "/data/mnist"
+    # target_dir = os.getcwd() + "/data/mnist"
+    target_dir = "/orcd/home/001/sandre/Repositories/JaxUvTest/data/mnist"
     url = f"{url_dir}/{filename}"
     target = f"{target_dir}/{filename}"
     if not os.path.exists(target):
@@ -12,3 +34,100 @@ def mnist():
         _, batch, rows, cols = struct.unpack(">IIII", fh.read(16))
         shape = (batch, 1, rows, cols)
         return jnp.array(array.array("B", fh.read()), dtype=jnp.uint8).reshape(shape)
+
+def dataloader(data, batch_size, key):
+    dataset_size = data.shape[0]
+    indices = jnp.arange(dataset_size)
+    while True:
+        key, subkey = jax.random.split(key)
+        perm = jax.random.permutation(subkey, indices)
+        start = 0
+        end = batch_size
+        while end < dataset_size:
+            batch_perm = perm[start:end]
+            yield data[batch_perm]
+            start = end
+            end = start + batch_size
+
+data = mnist() 
+data_mean = jnp.mean(data)
+data_std = jnp.std(data)
+data_max = jnp.max(data)
+data_min = jnp.min(data)
+data_shape = data.shape[1:]
+data = (data - data_mean) / data_std 
+
+
+# add util for calculating the distance
+key = jr.PRNGKey(0)
+key, subkey = jax.random.split(key)
+random_index_1 = jax.random.randint(key, 10, 0, data.shape[0]-1)
+key, subkey = jax.random.split(key)
+random_index_2 = jax.random.randint(key, 10, 0, data.shape[0]-1)
+
+tmp = jnp.linalg.norm(data[random_index_1, 0, :, :] - data[random_index_2, 0, :, :], axis=(1, 2))
+sigma_max = max(tmp) 
+sigma_min = 1e-2
+key, subkey = jax.random.split(key)
+fwd_process = VarExpBrownianMotion(sigma_min, sigma_max) 
+
+seed = 12345
+
+unet_hyperparameters = {
+    "data_shape": (1, 28, 28),      # Single-channel grayscale MNIST images
+    "is_biggan": True,              # Whether to use BigGAN architecture
+    "dim_mults": [1, 2, 4],         # Multiplicative factors for UNet feature map dimensions
+    "hidden_size": 16,              # Base hidden channel size
+    "heads": 8,                     # Number of attention heads
+    "dim_head": 7,                  # Size of each attention head
+    "num_res_blocks": 4,            # Number of residual blocks per stage
+    "attn_resolutions": [28, 14]    # Resolutions for applying attention
+}
+
+key = jr.PRNGKey(seed)
+
+if os.path.exists("test_save.mo"):
+    print("Loading file test_save.mo")
+    model = load("test_save.mo", UNet)
+    print("Done Loading model")
+else:
+    print("File test_save.mo does not exist. Creating UNet")
+    model = UNet(key = key, **unet_hyperparameters)
+    print("Done Creating UNet")
+
+model = load("test_save.mo", UNet)
+
+# Optimisation hyperparameters
+num_steps=10000
+lr=3e-4
+batch_size=32
+print_every=100
+# Sampling hyperparameters
+dt0= 0.05
+sample_size=10
+# Seed
+seed=5678
+
+
+opt = optax.adam(lr)
+# Optax will update the floating-point JAX arrays in the model.
+opt_state = opt.init(eqx.filter(model, eqx.is_inexact_array))
+
+model_key, train_key, loader_key, sample_key = jr.split(key, 4) 
+
+total_value = 0
+total_size = 0
+for step, data in zip(
+    range(num_steps), dataloader(data, batch_size, key=loader_key)
+):
+    value, model, train_key, opt_state = make_step(
+        model, fwd_process, data, train_key, opt_state, opt.update
+    )
+    total_value += value.item()
+    total_size += 1
+    if (step % print_every) == 0 or step == num_steps - 1:
+        print(f"Step={step} Loss={total_value / total_size}")
+        total_value = 0
+        total_size = 0
+
+save("test_save.mo", unet_hyperparameters, model)

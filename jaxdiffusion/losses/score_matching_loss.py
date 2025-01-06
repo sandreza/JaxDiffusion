@@ -19,7 +19,7 @@ def batch_loss_fn(model, fwd_process, data, key):
 
     t0 = fwd_process.tmin
     t1 = jnp.array([1.0])
-    t = jr.uniform(tkey, (batch_size,), minval=t0, maxval=t1 )
+    t = jr.uniform(tkey, (batch_size,), minval=t0, maxval=t1)
     sigma_p = jax.vmap(fwd_process.kernel_cholesky)(t, data)
 
     loss_fn = ft.partial(single_loss_fn, model)

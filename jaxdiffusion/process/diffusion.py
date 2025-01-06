@@ -1,3 +1,6 @@
+from abc import abstractmethod
+from typing import Optional, Union
+
 import diffrax as dfx
 import equinox as eqx
 import jax
