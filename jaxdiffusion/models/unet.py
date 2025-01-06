@@ -240,6 +240,7 @@ class UNet(eqx.Module):
         dim_head: int,
         num_res_blocks: int,
         attn_resolutions: list[int],
+        context_size: int = 0, 
         key,
     ):
         keys = jax.random.split(key, 7)
@@ -415,7 +416,7 @@ class UNet(eqx.Module):
         self.final_conv_layers = [
             eqx.nn.GroupNorm(min(hidden_size // 4, 32), hidden_size),
             jax.nn.silu,
-            eqx.nn.Conv2d(hidden_size, data_channels, 1, key=keys[6]),
+            eqx.nn.Conv2d(hidden_size, data_channels - context_size, 1, key=keys[6]),
         ]
 
     def __call__(self, t, y, *, key=None):
