@@ -22,6 +22,7 @@ from jaxdiffusion.models.save_and_load import save, load
 """
 
 from jaxdiffusion import *
+from jaxdiffusion.process.sampler import Sampler
 
 def mnist():
     filename = "train-images-idx3-ubyte.gz"
@@ -99,10 +100,8 @@ else:
     model = UNet(key = key, **unet_hyperparameters)
     print("Done Creating UNet")
 
-model = load("test_save.mo", UNet)
-
 # Optimisation hyperparameters
-num_steps=1000
+num_steps=100
 lr=3e-4
 batch_size=32
 print_every=100
@@ -135,56 +134,16 @@ for step, data in zip(
         total_size = 0
         save("test_save.mo", unet_hyperparameters, model)
 
+# Sampling
+data_shape = data[0, :, :, :].shape
+sampler = Sampler(fwd_process, model, data_shape)
+sqrt_N = 10
+samples = sampler.sample(sqrt_N**2)
 
-@eqx.filter_jit
-def score_model_precursor(model, t, y, args): 
-    yr = jnp.reshape(y, (1, 28, 28))
-    s = model(t, yr)
-    return jnp.reshape(s, (28**2))
-
-score_model = ft.partial(score_model_precursor, model)
-
-rev_process = ReverseProcess(fwd_process, score_model)
-
-@eqx.filter_jit
-def drift_precursor(model, fwd_process, t, y, args):
-    g = fwd_process.diff(t, y, None)
-    g2 = jnp.dot(g, jnp.transpose(g))
-    s = - jnp.dot(g2, model(t, y, None) )
-    return s
-
-drift = ft.partial(drift_precursor, score_model, fwd_process)
-
-key, subkey = jax.random.split(key)
-y0 = jr.normal(subkey, data[0:9, :, :, :].shape) * sigma_max
-y0r = jnp.reshape(y0, (9 , 28**2))
-
-brownian = dfx.VirtualBrownianTree(
-    fwd_process.tmin, fwd_process.tmax, tol=1e-2, shape=y0r[0, :].shape, key=subkey
-)
-
-dt0 = (fwd_process.tmin - fwd_process.tmax)/ 300
-solver = dfx.Heun()
-f = dfx.ODETerm(drift)
-g = dfx.ControlTerm(fwd_process.diff, brownian)
-terms = dfx.MultiTerm(f, g)
-
-sol = dfx.diffeqsolve(
-    terms, solver, fwd_process.tmax, fwd_process.tmin, dt0=dt0, y0=y0r[0, :]
-)
-
-def wrapper(terms, solver, fwd_process, dt0, y0r):
-    sol = dfx.diffeqsolve(terms, solver, fwd_process.tmax, fwd_process.tmin, dt0=dt0, y0=y0r)
-    return sol.ys
-
-desolver = ft.partial(wrapper, terms, solver, fwd_process, dt0)
-
-tmp = jax.vmap(desolver)(y0r)
-
-sample = jnp.reshape(tmp[0:9, :], (3, 3, 28, 28))
+# plotting
+sample = jnp.reshape(samples, (sqrt_N, sqrt_N, 28, 28))
 sample = jnp.transpose(sample, (0, 2, 1, 3))
-sample = jnp.reshape(sample, (3 * 28, 3 * 28))
-
+sample = jnp.reshape(sample, (sqrt_N * 28, sqrt_N * 28))
 sample = data_mean + data_std * sample
 sample = jnp.clip(sample, data_min, data_max)
 
