@@ -1,5 +1,43 @@
 from jaxdiffusion import *
 import numpy as np
+
+@eqx.filter_jit
+def conditional_single_loss_fn(model, context_size, std, data, t, key):
+    data_shape = list(data.shape)
+    data_shape[0] -= context_size
+    data_shape = tuple(data_shape)
+    
+    noise = jr.normal(key, data_shape)
+    y = jnp.copy(data)
+    y = y.at[:-context_size, :, :].add(std * noise)
+    
+    pred = model(t, y)
+    return jnp.mean((pred * std + noise) ** 2)
+
+@eqx.filter_jit
+def conditional_batch_loss_fn(model, context_size, fwd_process, data, key):
+    batch_size = data.shape[0]
+    tkey, losskey = jr.split(key)
+    losskey = jr.split(losskey, batch_size)
+
+    t0 = fwd_process.tmin
+    t1 = jnp.array([1.0])
+    t = jr.uniform(tkey, (batch_size,), minval=t0, maxval=t1)
+    sigma_p = jax.vmap(fwd_process.kernel_cholesky)(t, data[:, :-context_size, :, :])
+
+    loss_fn = ft.partial(conditional_single_loss_fn, model, context_size)
+    loss_fn = jax.vmap(loss_fn)
+    return jnp.mean(loss_fn(sigma_p, data, t, losskey))
+
+@eqx.filter_jit
+def conditional_make_step(model, context_size, fwd_process, data, key, opt_state, opt_update):
+    loss_fn = eqx.filter_value_and_grad(conditional_batch_loss_fn)
+    loss, grads = loss_fn(model, context_size, fwd_process, data, key)
+    updates, opt_state = opt_update(grads, opt_state)
+    model = eqx.apply_updates(model, updates)
+    key = jr.split(key, 1)[0]
+    return loss, model, key, opt_state
+
 def mnist():
     image_filename = "train-images-idx3-ubyte.gz"
     label_filename = "train-labels-idx1-ubyte.gz"
@@ -80,11 +118,11 @@ conditional_data = conditional_data.at[:, 0, :, :].set(data[:, 0, :, :])
 for label in range(10):
     conditional_data = conditional_data.at[labels == label, 1, :, :].set(label_averages[label])
 
-
 seed = 12345
 data_shape = conditional_data.shape[1:]
+context_size = 1
 unet_hyperparameters = {
-    "data_shape": data_shape,       # Single-channel grayscale MNIST images
+    "data_shape": data_shape,       # grayscale MNIST images with a "context" channel
     "is_biggan": True,              # Whether to use BigGAN architecture
     "dim_mults": [1, 2, 4],         # Multiplicative factors for UNet feature map dimensions
     "hidden_size": 16,              # Base hidden channel size
@@ -92,11 +130,11 @@ unet_hyperparameters = {
     "dim_head": 7,                  # Size of each attention head
     "num_res_blocks": 4,            # Number of residual blocks per stage
     "attn_resolutions": [28, 14],   # Resolutions for applying attention
-    "context_size": 1               # context dimension
+    "context_size": context_size,   # context dimension
 }
 
 key = jr.PRNGKey(seed)
-key, unet_key = jax.random.split(key)
+key, unet_key, subkey = jax.random.split(key, 3)
 
 if os.path.exists("conditional_test_save.mo"):
     print("Loading file conditional_test_save.mo")
@@ -107,4 +145,97 @@ else:
     model = UNet(key = unet_key, **unet_hyperparameters)
     print("Done Creating UNet")
 
-model(1.0, conditional_data[0, :, :, :])
+# Train Test Split
+test_size = 0.2
+dataset_size = data.shape[0]
+indices = jnp.arange(dataset_size)
+perm = jax.random.permutation(subkey, indices)
+test_size = int(dataset_size * test_size)
+train_size = dataset_size - test_size
+train_indices = perm[:train_size]
+test_indices = perm[train_size:]
+train_data = conditional_data[train_indices, :, :, :]
+test_data = conditional_data[test_indices, :, :, :]
+
+# Create DataLoaders
+subkey = jax.random.split(subkey)[1]
+batchsize = 32
+train_dataloader = dataloader(train_data, batchsize, subkey)
+test_dataloader = dataloader(test_data, batchsize, subkey)
+
+# Optimisation hyperparameters
+num_steps=1000
+lr=3e-4
+batch_size=32
+print_every=100
+# Sampling hyperparameters
+dt0= 0.05
+sample_size=10
+# Seed
+seed=5678
+
+
+opt = optax.adam(lr)
+# Optax will update the floating-point JAX arrays in the model.
+opt_state = opt.init(eqx.filter(model, eqx.is_inexact_array))
+
+model_key, train_key, test_key, loader_key, sample_key = jr.split(key, 5) 
+
+total_value = 0
+total_size = 0
+train_value = 0
+for step, data, test_data in zip(range(num_steps), dataloader(train_data, batch_size, key=loader_key), dataloader(test_data, batch_size, key=loader_key)):
+    value, model, train_key, opt_state = conditional_make_step(
+        model, context_size, fwd_process, data, train_key, opt_state, opt.update
+    )
+    total_value += value.item()
+    train_value += conditional_batch_loss_fn(model, context_size, fwd_process, test_data, test_key)
+    total_size += 1
+    if (step % print_every) == 0 or step == num_steps - 1:
+        print(f"Step={step} Loss={total_value / total_size}")
+        print(f"Test Loss={train_value / total_size}")
+        total_value = 0
+        train_value = 0
+        total_size = 0
+        save("conditional_test_save.mo", unet_hyperparameters, model)
+
+
+def precursor_context_model(model, context, t, y):
+    y = jnp.concatenate((y, context), axis=0)
+    return model(t, y)
+
+context = conditional_data[0, 1:, :, :]
+tmp = jnp.zeros((1, 28, 28))
+context_model = ft.partial(precursor_context_model, model, context)
+
+# Sampling
+data_shape = conditional_data[0, 0:1, :, :].shape
+sampler = Sampler(fwd_process, context_model, data_shape)
+sqrt_N = 10
+samples = sampler.sample(sqrt_N**2)
+
+# plotting
+sample = jnp.reshape(samples, (sqrt_N, sqrt_N, 28, 28))
+sample = data_mean + data_std * sample
+sample = jnp.clip(sample, data_min, data_max)
+
+conditional_information = context * data_std + data_mean 
+conditional_information = jnp.clip(conditional_information, data_min, data_max)
+
+fig, axes = plt.subplots(10, 10, figsize=(10, 10))
+# Plot the original images (0 index of axis 1)
+for i in range(10):
+    for j in range(10):
+        if i == j == 0: 
+            axes[j, i].imshow(context[0, :, :], cmap="Greys")
+            axes[j, i].set_title(f"Context")
+            axes[j, i].axis("off")
+        else:
+            axes[j, i].imshow(sample[i, j, :, :], cmap="Greys")
+            axes[j, i].set_title(f"{i}, {j}")
+            axes[j, i].axis("off")
+
+plt.tight_layout()
+plt.show()
+filename = "mnist_diffusion_unet_quax.png"
+plt.savefig(filename)
