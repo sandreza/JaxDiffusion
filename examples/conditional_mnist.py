@@ -1,5 +1,5 @@
 from jaxdiffusion import *
-import numpy as np
+from jaxdiffusion.process.sampler import Sampler
 
 @eqx.filter_jit
 def conditional_single_loss_fn(model, context_size, std, data, t, key):
@@ -164,7 +164,7 @@ train_dataloader = dataloader(train_data, batchsize, subkey)
 test_dataloader = dataloader(test_data, batchsize, subkey)
 
 # Optimisation hyperparameters
-num_steps=1000
+num_steps=100000
 lr=3e-4
 batch_size=32
 print_every=100
@@ -204,16 +204,18 @@ def precursor_context_model(model, context, t, y):
     y = jnp.concatenate((y, context), axis=0)
     return model(t, y)
 
-context = conditional_data[0, 1:, :, :]
+context_ind = 1
+context = conditional_data[context_ind, 1:, :, :]
 tmp = jnp.zeros((1, 28, 28))
 context_model = ft.partial(precursor_context_model, model, context)
 
 # Sampling
+print("Sampling")
 data_shape = conditional_data[0, 0:1, :, :].shape
 sampler = Sampler(fwd_process, context_model, data_shape)
 sqrt_N = 10
 samples = sampler.sample(sqrt_N**2)
-
+print("Done Sampling, Now Plotting")
 # plotting
 sample = jnp.reshape(samples, (sqrt_N, sqrt_N, 28, 28))
 sample = data_mean + data_std * sample
@@ -237,5 +239,5 @@ for i in range(10):
 
 plt.tight_layout()
 plt.show()
-filename = "mnist_diffusion_unet_quax.png"
+filename = "mnist_diffusion_unet_quax_with_context_" + str(labels[context_ind]) + ".png"
 plt.savefig(filename)
