@@ -125,9 +125,9 @@ unet_hyperparameters = {
     "data_shape": data_shape,       # grayscale MNIST images with a "context" channel
     "is_biggan": True,              # Whether to use BigGAN architecture
     "dim_mults": [1, 2, 4],         # Multiplicative factors for UNet feature map dimensions
-    "hidden_size": 16,              # Base hidden channel size
-    "heads": 8,                     # Number of attention heads
-    "dim_head": 7,                  # Size of each attention head
+    "hidden_size": 32,              # Base hidden channel size
+    "heads": 10,                     # Number of attention heads
+    "dim_head": 28,                  # Size of each attention head
     "num_res_blocks": 4,            # Number of residual blocks per stage
     "attn_resolutions": [28, 14],   # Resolutions for applying attention
     "context_size": context_size,   # context dimension
