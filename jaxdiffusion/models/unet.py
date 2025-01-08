@@ -8,7 +8,7 @@ import jax.numpy as jnp
 import jax.random as jr
 from einops import rearrange
 
-
+# modified from: https://github.com/patrick-kidger/equinox/blob/main/examples/unet.ipynb
 class SinusoidalPosEmb(eqx.Module):
     emb: jax.Array
 
@@ -21,7 +21,6 @@ class SinusoidalPosEmb(eqx.Module):
         emb = x * self.emb
         emb = jnp.concatenate((jnp.sin(emb), jnp.cos(emb)), axis=-1)
         return emb
-
 
 class LinearTimeSelfAttention(eqx.Module):
     group_norm: eqx.nn.GroupNorm
@@ -418,7 +417,7 @@ class UNet(eqx.Module):
             jax.nn.silu,
             eqx.nn.Conv2d(hidden_size, data_channels - context_size, 1, key=keys[6]),
         ]
-
+    @eqx.filter_jit
     def __call__(self, t, y, *, key=None):
         t = self.time_pos_emb(t)
         t = self.mlp(t)

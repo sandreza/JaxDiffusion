@@ -105,7 +105,7 @@ random_index_2 = jax.random.randint(key, 10, 0, data.shape[0]-1)
 
 tmp = jnp.linalg.norm(data[random_index_1, 0, :, :] - data[random_index_2, 0, :, :], axis=(1, 2))
 sigma_max = max(tmp) 
-sigma_min = 1e-2
+sigma_min = 1e-3
 key, subkey = jax.random.split(key)
 fwd_process = VarExpBrownianMotion(sigma_min, sigma_max) 
 
@@ -124,12 +124,12 @@ context_size = 1
 unet_hyperparameters = {
     "data_shape": data_shape,       # grayscale MNIST images with a "context" channel
     "is_biggan": True,              # Whether to use BigGAN architecture
-    "dim_mults": [1, 2, 4],         # Multiplicative factors for UNet feature map dimensions
+    "dim_mults": [1, 4, 16],         # Multiplicative factors for UNet feature map dimensions
     "hidden_size": 32,              # Base hidden channel size
-    "heads": 10,                     # Number of attention heads
-    "dim_head": 28,                  # Size of each attention head
-    "num_res_blocks": 4,            # Number of residual blocks per stage
-    "attn_resolutions": [28, 14],   # Resolutions for applying attention
+    "heads": 2,                     # Number of attention heads
+    "dim_head": 14,                  # Size of each attention head
+    "num_res_blocks": 3,            # Number of residual blocks per stage
+    "attn_resolutions": [28, 14, 7],   # Resolutions for applying attention
     "context_size": context_size,   # context dimension
 }
 
@@ -159,12 +159,12 @@ test_data = conditional_data[test_indices, :, :, :]
 
 # Create DataLoaders
 subkey = jax.random.split(subkey)[1]
-batchsize = 32
+batchsize = 32 * 4
 train_dataloader = dataloader(train_data, batchsize, subkey)
 test_dataloader = dataloader(test_data, batchsize, subkey)
 
 # Optimisation hyperparameters
-num_steps=100000
+num_steps= 100000
 lr=3e-4
 batch_size=32
 print_every=100
@@ -199,45 +199,48 @@ for step, data, test_data in zip(range(num_steps), dataloader(train_data, batch_
         total_size = 0
         save("conditional_test_save.mo", unet_hyperparameters, model)
 
-
 def precursor_context_model(model, context, t, y):
     y = jnp.concatenate((y, context), axis=0)
     return model(t, y)
 
-context_ind = 1
-context = conditional_data[context_ind, 1:, :, :]
-tmp = jnp.zeros((1, 28, 28))
-context_model = ft.partial(precursor_context_model, model, context)
-
-# Sampling
-print("Sampling")
-data_shape = conditional_data[0, 0:1, :, :].shape
-sampler = Sampler(fwd_process, context_model, data_shape)
-sqrt_N = 10
-samples = sampler.sample(sqrt_N**2)
-print("Done Sampling, Now Plotting")
-# plotting
-sample = jnp.reshape(samples, (sqrt_N, sqrt_N, 28, 28))
-sample = data_mean + data_std * sample
-sample = jnp.clip(sample, data_min, data_max)
-
-conditional_information = context * data_std + data_mean 
-conditional_information = jnp.clip(conditional_information, data_min, data_max)
-
-fig, axes = plt.subplots(10, 10, figsize=(10, 10))
-# Plot the original images (0 index of axis 1)
+first_indices = {}
 for i in range(10):
-    for j in range(10):
-        if i == j == 0: 
-            axes[j, i].imshow(context[0, :, :], cmap="Greys")
-            axes[j, i].set_title(f"Context")
-            axes[j, i].axis("off")
-        else:
-            axes[j, i].imshow(sample[i, j, :, :], cmap="Greys")
-            axes[j, i].set_title(f"{i}, {j}")
-            axes[j, i].axis("off")
+    first_indices[i] = jnp.where(labels == i)[0][0]
 
-plt.tight_layout()
-plt.show()
-filename = "mnist_diffusion_unet_quax_with_context_" + str(labels[context_ind]) + ".png"
-plt.savefig(filename)
+for ii in range(10):
+    context_ind = first_indices[ii]
+    context = conditional_data[context_ind, 1:, :, :]
+    tmp = jnp.zeros((1, 28, 28))
+    context_model = ft.partial(precursor_context_model, model, context)
+
+    # Sampling
+    print("Sampling " + str(labels[context_ind]))
+    data_shape = conditional_data[0, 0:1, :, :].shape
+    sampler = Sampler(fwd_process, context_model, data_shape)
+    sqrt_N = 10
+    samples = sampler.sample(sqrt_N**2, steps = 30)
+    print("Done Sampling, Now Plotting")
+    # plotting
+    sample = jnp.reshape(samples, (sqrt_N, sqrt_N, 28, 28))
+    sample = data_mean + data_std * sample
+    sample = jnp.clip(sample, data_min, data_max)
+
+    conditional_information = context * data_std + data_mean 
+    conditional_information = jnp.clip(conditional_information, data_min, data_max)
+
+    fig, axes = plt.subplots(sqrt_N, sqrt_N, figsize=(sqrt_N, sqrt_N))
+    # Plot the original images (0 index of axis 1)
+    for i in range(sqrt_N):
+        for j in range(sqrt_N):
+            if i == j == 0: 
+                axes[j, i].imshow(context[0, :, :], cmap="Greys")
+                axes[j, i].set_title(f"Context")
+                axes[j, i].axis("off")
+            else:
+                axes[j, i].imshow(sample[i, j, :, :], cmap="Greys")
+                axes[j, i].set_title(f"{i}, {j}")
+                axes[j, i].axis("off")
+    plt.tight_layout()
+    plt.show()
+    filename = "mnist_diffusion_unet_quax_with_context_" + str(labels[context_ind]) + ".png"
+    plt.savefig(filename)
