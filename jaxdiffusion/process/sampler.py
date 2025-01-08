@@ -22,8 +22,8 @@ class Sampler:
             return s
         
         @eqx.filter_jit
-        def diffusion_precursor(sigma, t, y):
-            return sigma(t) * jnp.zeros(y.shape)
+        def diffusion_precursor(sigma, t, y, args = None):
+            return sigma(t) * jnp.zeros(y.shape[0])
         
         @eqx.filter_jit
         def score_model_precursor(model, data_shape, t, y, args): 
