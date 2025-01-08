@@ -20,7 +20,7 @@ from jaxdiffusion.losses.score_matching_loss import make_step, single_loss_fn
 from jaxdiffusion.process.diffusion import VarExpBrownianMotion, ReverseProcess
 from jaxdiffusion.models.save_and_load import save, load
 """
-
+import math
 from jaxdiffusion import *
 from jaxdiffusion.process.sampler import Sampler
 
@@ -86,7 +86,7 @@ else:
     print("Done Creating UNet")
 
 # Optimisation hyperparameters
-num_steps=100
+num_steps=0
 lr=3e-4
 batch_size=32
 print_every=100
@@ -139,3 +139,25 @@ plt.tight_layout()
 plt.show()
 filename = "mnist_diffusion_unet_quax.png"
 plt.savefig(filename)
+
+##
+N = 10
+steps = 10
+subkey = jax.random.split(key, N)
+y0 = jr.normal(subkey[0], (N, math.prod(sampler.data_shape))) * sampler.schedule.sigma_max 
+dt0 = (sampler.schedule.tmin - sampler.schedule.tmax)/ steps
+
+ys = sampler.precursor_desolver(dt0, y0[0, :], subkey[0])
+
+@eqx.filter_jit
+def diffusion_precursor(sigma, t, y):
+    return sigma(t) * jnp.eye(1)
+
+diffusion = ft.partial(diffusion_precursor, schedule.sigma)
+
+brownian = dfx.VirtualBrownianTree(sampler.schedule.tmin, sampler.schedule.tmax, tol=1e-2, shape=y0.shape, key=key)
+solver = dfx.Heun()
+f = dfx.ODETerm(sampler.drift)
+g = dfx.ControlTerm(diffusion, brownian)
+terms = dfx.MultiTerm(f, g)
+sol = dfx.diffeqsolve(g, solver, sampler.schedule.tmax, sampler.schedule.tmin, dt0=dt0, y0=y0[0, :])

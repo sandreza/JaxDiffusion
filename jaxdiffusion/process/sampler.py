@@ -23,7 +23,7 @@ class Sampler:
         
         @eqx.filter_jit
         def diffusion_precursor(sigma, t, y):
-            return sigma(t) * jnp.eye(y.shape[0])
+            return sigma(t) * jnp.zeros(y.shape)
         
         @eqx.filter_jit
         def score_model_precursor(model, data_shape, t, y, args): 
@@ -41,25 +41,21 @@ class Sampler:
         self.diffusion = diffusion
 
     @eqx.filter_jit
-    def sample(self, N, *, context = None, key = jr.PRNGKey(12345), steps = 300):
-        if context is None:
-            subkey = jax.random.split(key, N)
-            y0 = jr.normal(subkey[0], (N, math.prod(self.data_shape))) * self.schedule.sigma_max # technically wrong
-            dt0 = (self.schedule.tmin - self.schedule.tmax)/ steps
-
-            def wrapper(schedule, dt0, y0, key):
-                brownian = dfx.VirtualBrownianTree(schedule.tmin, schedule.tmax, tol=1e-2, shape=y0.shape, key=key)
-                solver = dfx.Heun()
-                f = dfx.ODETerm(self.drift)
-                g = dfx.ControlTerm(self.diffusion, brownian)
-                terms = dfx.MultiTerm(f, g)
-                sol = dfx.diffeqsolve(terms, solver, schedule.tmax, schedule.tmin, dt0=dt0, y0=y0)
-                return sol.ys
-
-            desolver = ft.partial(wrapper, self.schedule, dt0)
-            samples = jax.vmap(desolver)(y0, subkey)
-            samples = jnp.reshape(samples, (N,  *self.data_shape))
-            return samples
-        else:
-            print("Context is not None")
-            return None
+    def precursor_desolver(self, dt0, y0, key):
+        brownian = dfx.VirtualBrownianTree(self.schedule.tmin, self.schedule.tmax, tol=1e-2, shape=y0.shape, key=key)
+        solver = dfx.Heun()
+        f = dfx.ODETerm(self.drift)
+        g = dfx.ControlTerm(self.diffusion, brownian)
+        terms = dfx.MultiTerm(f, g)
+        sol = dfx.diffeqsolve(terms, solver, self.schedule.tmax, self.schedule.tmin, dt0=dt0, y0=y0)
+        return sol.ys
+    
+    @eqx.filter_jit
+    def sample(self, N, *, key = jr.PRNGKey(12345), steps = 300):
+        subkey = jax.random.split(key, N)
+        y0 = jr.normal(subkey[0], (N, math.prod(self.data_shape))) * self.schedule.sigma_max 
+        dt0 = (self.schedule.tmin - self.schedule.tmax)/ steps
+        desolver = ft.partial(self.precursor_desolver, dt0)
+        samples = jax.vmap(desolver)(y0, subkey)
+        samples = jnp.reshape(samples, (N,  *self.data_shape))
+        return samples
