@@ -1,43 +1,6 @@
 from jaxdiffusion import *
 from jaxdiffusion.process.sampler import Sampler
 
-@eqx.filter_jit
-def conditional_single_loss_fn(model, context_size, std, data, t, key):
-    data_shape = list(data.shape)
-    data_shape[0] -= context_size
-    data_shape = tuple(data_shape)
-    
-    noise = jr.normal(key, data_shape)
-    y = jnp.copy(data)
-    y = y.at[:-context_size, :, :].add(std * noise)
-    
-    pred = model(t, y)
-    return jnp.mean((pred * std + noise) ** 2)
-
-@eqx.filter_jit
-def conditional_batch_loss_fn(model, context_size, fwd_process, data, key):
-    batch_size = data.shape[0]
-    tkey, losskey = jr.split(key)
-    losskey = jr.split(losskey, batch_size)
-
-    t0 = fwd_process.tmin
-    t1 = jnp.array([1.0])
-    t = jr.uniform(tkey, (batch_size,), minval=t0, maxval=t1)
-    sigma_p = jax.vmap(fwd_process.kernel_cholesky)(t, data[:, :-context_size, :, :])
-
-    loss_fn = ft.partial(conditional_single_loss_fn, model, context_size)
-    loss_fn = jax.vmap(loss_fn)
-    return jnp.mean(loss_fn(sigma_p, data, t, losskey))
-
-@eqx.filter_jit
-def conditional_make_step(model, context_size, fwd_process, data, key, opt_state, opt_update):
-    loss_fn = eqx.filter_value_and_grad(conditional_batch_loss_fn)
-    loss, grads = loss_fn(model, context_size, fwd_process, data, key)
-    updates, opt_state = opt_update(grads, opt_state)
-    model = eqx.apply_updates(model, updates)
-    key = jr.split(key, 1)[0]
-    return loss, model, key, opt_state
-
 def mnist():
     image_filename = "train-images-idx3-ubyte.gz"
     label_filename = "train-labels-idx1-ubyte.gz"
@@ -71,20 +34,6 @@ def mnist():
         labels = jnp.array(array.array("B", fh.read()), dtype=jnp.uint8)
 
     return images, labels
-
-def dataloader(data, batch_size, key):
-    dataset_size = data.shape[0]
-    indices = jnp.arange(dataset_size)
-    while True:
-        key, subkey = jax.random.split(key)
-        perm = jax.random.permutation(subkey, indices)
-        start = 0
-        end = batch_size
-        while end < dataset_size:
-            batch_perm = perm[start:end]
-            yield data[batch_perm]
-            start = end
-            end = start + batch_size
 
 # Assuming images and labels are already loaded
 images, labels = mnist()
@@ -124,11 +73,11 @@ context_size = 1
 unet_hyperparameters = {
     "data_shape": data_shape,       # grayscale MNIST images with a "context" channel
     "is_biggan": True,              # Whether to use BigGAN architecture
-    "dim_mults": [1, 4, 16],         # Multiplicative factors for UNet feature map dimensions
+    "dim_mults": [1, 2, 4],         # Multiplicative factors for UNet feature map dimensions
     "hidden_size": 32,              # Base hidden channel size
-    "heads": 2,                     # Number of attention heads
-    "dim_head": 14,                  # Size of each attention head
-    "num_res_blocks": 3,            # Number of residual blocks per stage
+    "heads": 28,                     # Number of attention heads
+    "dim_head": 28,                  # Size of each attention head
+    "num_res_blocks": 4,            # Number of residual blocks per stage
     "attn_resolutions": [28, 14, 7],   # Resolutions for applying attention
     "context_size": context_size,   # context dimension
 }

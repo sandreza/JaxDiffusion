@@ -14,4 +14,8 @@ def load(filename, model_name):
         model = model_name(key=jr.PRNGKey(0), **hyperparams)
         return eqx.tree_deserialise_leaves(f, model)
 
+def load_hyperparameters(filename):
+    with open(filename, "rb") as f:
+        hyperparams = json.loads(f.readline().decode())
+        return hyperparams
 

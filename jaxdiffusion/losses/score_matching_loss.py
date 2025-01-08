@@ -12,24 +12,61 @@ def single_loss_fn(model, std, data, t, key):
     return jnp.mean((pred * std + noise  ) ** 2)
 
 @eqx.filter_jit
-def batch_loss_fn(model, fwd_process, data, key):
+def batch_loss_fn(model, schedule, data, key):
     batch_size = data.shape[0]
     tkey, losskey = jr.split(key)
     losskey = jr.split(losskey, batch_size)
 
-    t0 = fwd_process.tmin
+    t0 = schedule.tmin
     t1 = jnp.array([1.0])
     t = jr.uniform(tkey, (batch_size,), minval=t0, maxval=t1)
-    sigma_p = jax.vmap(fwd_process.kernel_cholesky)(t, data)
+    sigmas = jax.vmap(schedule.sigma)(t)
 
     loss_fn = ft.partial(single_loss_fn, model)
     loss_fn = jax.vmap(loss_fn)
-    return jnp.mean(loss_fn(sigma_p, data, t, losskey))
+    return jnp.mean(loss_fn(sigmas, data, t, losskey))
 
 @eqx.filter_jit
-def make_step(model, fwd_process, data, key, opt_state, opt_update):
+def make_step(model, schedule, data, key, opt_state, opt_update):
     loss_fn = eqx.filter_value_and_grad(batch_loss_fn)
-    loss, grads = loss_fn(model, fwd_process, data, key)
+    loss, grads = loss_fn(model, schedule, data, key)
+    updates, opt_state = opt_update(grads, opt_state)
+    model = eqx.apply_updates(model, updates)
+    key = jr.split(key, 1)[0]
+    return loss, model, key, opt_state
+
+@eqx.filter_jit
+def conditional_single_loss_fn(model, context_size, std, data, t, key):
+    data_shape = list(data.shape)
+    data_shape[0] -= context_size
+    data_shape = tuple(data_shape)
+    
+    noise = jr.normal(key, data_shape)
+    y = jnp.copy(data)
+    y = y.at[:-context_size, :, :].add(std * noise)
+    
+    pred = model(t, y)
+    return jnp.mean((pred * std + noise) ** 2)
+
+@eqx.filter_jit
+def conditional_batch_loss_fn(model, context_size, schedule, data, key):
+    batch_size = data.shape[0]
+    tkey, losskey = jr.split(key)
+    losskey = jr.split(losskey, batch_size)
+
+    t0 = schedule.tmin
+    t1 = jnp.array([1.0])
+    t = jr.uniform(tkey, (batch_size,), minval=t0, maxval=t1)
+    sigmas = jax.vmap(schedule.sigma)(t)
+
+    loss_fn = ft.partial(conditional_single_loss_fn, model, context_size)
+    loss_fn = jax.vmap(loss_fn)
+    return jnp.mean(loss_fn(sigmas, data, t, losskey))
+
+@eqx.filter_jit
+def conditional_make_step(model, context_size, schedule, data, key, opt_state, opt_update):
+    loss_fn = eqx.filter_value_and_grad(conditional_batch_loss_fn)
+    loss, grads = loss_fn(model, context_size, schedule, data, key)
     updates, opt_state = opt_update(grads, opt_state)
     model = eqx.apply_updates(model, updates)
     key = jr.split(key, 1)[0]

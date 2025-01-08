@@ -15,14 +15,12 @@ import matplotlib.pyplot as plt
 import optax  # https://github.com/deepmind/optax
 
 from jaxdiffusion.models.unet import UNet
-from jaxdiffusion.losses.score_matching_loss import make_step, single_loss_fn
-from jaxdiffusion.process.diffusion import VarExpBrownianMotion, ReverseProcess
-from jaxdiffusion.models.save_and_load import save, load
+from jaxdiffusion.models.save_and_load import save, load, load_hyperparameters
 
 seed = 12345
 
 unet_hyperparameters = {
-    "data_shape": (1, 28, 28),      # Single-channel grayscale MNIST images
+    "data_shape": [1, 28, 28],      # Single-channel grayscale MNIST images
     "is_biggan": True,              # Whether to use BigGAN architecture
     "dim_mults": [1, 2, 4],         # Multiplicative factors for UNet feature map dimensions
     "hidden_size": 16,              # Base hidden channel size
@@ -41,3 +39,7 @@ data = jnp.ones((1, 28, 28))
 tmp1 = model_loaded(1.0, data)
 tmp2 = model(1.0, data)
 jnp.linalg.norm(tmp1 - tmp2)
+
+hyperparameters_loaded = load_hyperparameters("test_save.mo")
+
+hyperparameters_loaded == unet_hyperparameters
