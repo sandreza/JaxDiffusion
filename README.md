@@ -2,7 +2,7 @@
 
 ## Setup Instructions
 
-Follow the instructions below to set up the repository:
+First change into the `JaxDiffusion` directory and follow the instructions below to set up the repository:
 
 1. Install `uv`:
     ```sh
