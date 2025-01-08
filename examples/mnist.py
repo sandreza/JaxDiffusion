@@ -40,7 +40,13 @@ def mnist():
         shape = (batch, 1, rows, cols)
         return jnp.array(array.array("B", fh.read()), dtype=jnp.uint8).reshape(shape)
 
-data = mnist() 
+images = mnist() 
+data_mean = jnp.mean(images)
+data_std = jnp.std(images)
+data_max = jnp.max(images)
+data_min = jnp.min(images)
+data_shape = images.shape[1:]
+data = (images - data_mean) / data_std 
 
 # add util for calculating the distance
 key = jr.PRNGKey(0)
@@ -52,10 +58,10 @@ random_index_2 = jax.random.randint(key, 10, 0, data.shape[0]-1)
 tmp = jnp.linalg.norm(data[random_index_1, 0, :, :] - data[random_index_2, 0, :, :], axis=(1, 2))
 sigma_max = max(tmp) 
 sigma_min = 1e-2
-key, subkey = jax.random.split(key)
-fwd_process = VarExpBrownianMotion(sigma_min, sigma_max) 
+schedule = VarianceExplodingBrownianMotion(sigma_min, sigma_max) 
 
 seed = 12345
+key, subkey = jax.random.split(key)
 
 unet_hyperparameters = {
     "data_shape": (1, 28, 28),      # Single-channel grayscale MNIST images
@@ -103,7 +109,7 @@ for step, data in zip(
     range(num_steps), dataloader(data, batch_size, key=loader_key)
 ):
     value, model, train_key, opt_state = make_step(
-        model, fwd_process, data, train_key, opt_state, opt.update
+        model, schedule, data, train_key, opt_state, opt.update
     )
     total_value += value.item()
     total_size += 1
@@ -115,7 +121,7 @@ for step, data in zip(
 
 # Sampling
 data_shape = data[0, :, :, :].shape
-sampler = Sampler(fwd_process, model, data_shape)
+sampler = Sampler(schedule, model, data_shape)
 sqrt_N = 10
 samples = sampler.sample(sqrt_N**2)
 

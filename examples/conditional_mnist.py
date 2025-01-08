@@ -56,7 +56,7 @@ tmp = jnp.linalg.norm(data[random_index_1, 0, :, :] - data[random_index_2, 0, :,
 sigma_max = max(tmp) 
 sigma_min = 1e-3
 key, subkey = jax.random.split(key)
-fwd_process = VarExpBrownianMotion(sigma_min, sigma_max) 
+schedule = VarianceExplodingBrownianMotion(sigma_min, sigma_max) 
 
 # Calculate the average value for each label
 label_averages = jnp.array([jnp.mean(data[labels == label, :, :, :], axis=0)[0, :, :] for label in range(10)], dtype = data.dtype)
@@ -135,10 +135,10 @@ total_size = 0
 train_value = 0
 for step, data, test_data in zip(range(num_steps), dataloader(train_data, batch_size, key=loader_key), dataloader(test_data, batch_size, key=loader_key)):
     value, model, train_key, opt_state = conditional_make_step(
-        model, context_size, fwd_process, data, train_key, opt_state, opt.update
+        model, context_size, schedule, data, train_key, opt_state, opt.update
     )
     total_value += value.item()
-    train_value += conditional_batch_loss_fn(model, context_size, fwd_process, test_data, test_key)
+    train_value += conditional_batch_loss_fn(model, context_size, schedule, test_data, test_key)
     total_size += 1
     if (step % print_every) == 0 or step == num_steps - 1:
         print(f"Step={step} Loss={total_value / total_size}")
@@ -165,7 +165,7 @@ for ii in range(10):
     # Sampling
     print("Sampling " + str(labels[context_ind]))
     data_shape = conditional_data[0, 0:1, :, :].shape
-    sampler = Sampler(fwd_process, context_model, data_shape)
+    sampler = Sampler(schedule, context_model, data_shape)
     sqrt_N = 10
     samples = sampler.sample(sqrt_N**2, steps = 30)
     print("Done Sampling, Now Plotting")
