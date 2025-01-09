@@ -89,7 +89,7 @@ key, unet_key, subkey = jax.random.split(key, 3)
 
 model_filename = "mnist_conditional_diffusion_unet.mo"
 if os.path.exists(model_filename):
-    print("Loading file " * model_filename)
+    print("Loading file " + model_filename)
     model = load(model_filename, UNet)
     model_hyperparameters = load_hyperparameters(model_filename)
     print("Done Loading model with hyperparameters")
@@ -135,19 +135,19 @@ model_key, train_key, test_key, loader_key, sample_key = jr.split(key, 5)
 
 total_value = 0
 total_size = 0
-train_value = 0
+test_value = 0
 for step, data, test_data in zip(range(num_steps), dataloader(train_data, batch_size, key=loader_key), dataloader(test_data, batch_size, key=loader_key)):
     value, model, train_key, opt_state = conditional_make_step(
         model, context_size, schedule, data, train_key, opt_state, opt.update
     )
     total_value += value.item()
-    train_value += conditional_batch_loss_function(model, context_size, schedule, test_data, test_key)
+    test_value += conditional_batch_loss_function(model, context_size, schedule, test_data, test_key)
     total_size += 1
     if (step % print_every) == 0 or step == num_steps - 1:
         print(f"Step={step} Loss={total_value / total_size}")
-        print(f"Test Loss={train_value / total_size}")
+        print(f"Test Loss={test_value / total_size}")
         total_value = 0
-        train_value = 0
+        test_value = 0
         total_size = 0
         save(model_filename, unet_hyperparameters, model)
 
@@ -174,7 +174,7 @@ for ii in range(10):
     data_shape = conditional_data[0, 0:1, :, :].shape
     sampler = Sampler(schedule, context_model, data_shape)
     sqrt_N = 10
-    samples = sampler.sample(sqrt_N**2, steps = 30)
+    samples = sampler.sample(sqrt_N**2, steps = 100)
     print("Done Sampling, Now Plotting")
     # plotting
     sample = jnp.reshape(samples, (sqrt_N, sqrt_N, 28, 28))

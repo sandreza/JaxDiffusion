@@ -66,7 +66,7 @@ else:
     print("Done Creating UNet")
 
 # Optimisation hyperparameters
-num_steps=100000
+num_steps= 100000
 lr=3e-4
 batch_size = 32*4
 print_every=100
