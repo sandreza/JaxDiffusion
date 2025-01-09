@@ -67,31 +67,35 @@ conditional_data = conditional_data.at[:, 0, :, :].set(data[:, 0, :, :])
 for label in range(10):
     conditional_data = conditional_data.at[labels == label, 1, :, :].set(label_averages[label])
 
+# Loss Function assumes that all context channels are the last indices of the "channel" dimension
 seed = 12345
 data_shape = conditional_data.shape[1:]
 context_size = 1
 unet_hyperparameters = {
-    "data_shape": data_shape,       # grayscale MNIST images with a "context" channel
-    "is_biggan": True,              # Whether to use BigGAN architecture
-    "dim_mults": [1, 2, 4],         # Multiplicative factors for UNet feature map dimensions
-    "hidden_size": 32,              # Base hidden channel size
+    "data_shape": data_shape,        # grayscale MNIST images with a "context" channel
+    "is_biggan": True,               # Whether to use BigGAN architecture
+    "dim_mults": [1, 2, 4],          # Multiplicative factors for UNet feature map dimensions
+    "hidden_size": 32,               # Base hidden channel size
     "heads": 28,                     # Number of attention heads
     "dim_head": 28,                  # Size of each attention head
-    "num_res_blocks": 4,            # Number of residual blocks per stage
-    "attn_resolutions": [28, 14, 7],   # Resolutions for applying attention
-    "context_size": context_size,   # context dimension
+    "num_res_blocks": 4,             # Number of residual blocks per stage
+    "attn_resolutions": [28, 14, 7], # Resolutions for applying attention
+    "context_size": context_size,    # context dimension
 }
 
 key = jr.PRNGKey(seed)
 key, unet_key, subkey = jax.random.split(key, 3)
 
-if os.path.exists("conditional_test_save.mo"):
-    print("Loading file conditional_test_save.mo")
-    model = load("conditional_test_save.mo", UNet)
-    print("Done Loading model")
+model_filename = "mnist_conditional_diffusion_unet.mo"
+if os.path.exists(model_filename):
+    print("Loading file " * model_filename)
+    model = load(model_filename, UNet)
+    model_hyperparameters = load_hyperparameters(model_filename)
+    print("Done Loading model with hyperparameters")
+    print(model_hyperparameters)
 else:
-    print("File conditional_test_save.mo does not exist. Creating UNet")
-    model = UNet(key = unet_key, **unet_hyperparameters)
+    print("File test_save.mo does not exist. Creating UNet")
+    model = UNet(key = key, **unet_hyperparameters)
     print("Done Creating UNet")
 
 # Train Test Split
@@ -123,11 +127,9 @@ sample_size=10
 # Seed
 seed=5678
 
-
+# Training
 opt = optax.adam(lr)
-# Optax will update the floating-point JAX arrays in the model.
 opt_state = opt.init(eqx.filter(model, eqx.is_inexact_array))
-
 model_key, train_key, test_key, loader_key, sample_key = jr.split(key, 5) 
 
 total_value = 0
@@ -138,7 +140,7 @@ for step, data, test_data in zip(range(num_steps), dataloader(train_data, batch_
         model, context_size, schedule, data, train_key, opt_state, opt.update
     )
     total_value += value.item()
-    train_value += conditional_batch_loss_fn(model, context_size, schedule, test_data, test_key)
+    train_value += conditional_batch_loss_function(model, context_size, schedule, test_data, test_key)
     total_size += 1
     if (step % print_every) == 0 or step == num_steps - 1:
         print(f"Step={step} Loss={total_value / total_size}")
@@ -146,12 +148,16 @@ for step, data, test_data in zip(range(num_steps), dataloader(train_data, batch_
         total_value = 0
         train_value = 0
         total_size = 0
-        save("conditional_test_save.mo", unet_hyperparameters, model)
+        save(model_filename, unet_hyperparameters, model)
 
+save(model_filename, unet_hyperparameters, model)
+
+# Sampling
 def precursor_context_model(model, context, t, y):
     y = jnp.concatenate((y, context), axis=0)
     return model(t, y)
 
+# Plotting
 first_indices = {}
 for i in range(10):
     first_indices[i] = jnp.where(labels == i)[0][0]
@@ -191,5 +197,5 @@ for ii in range(10):
                 axes[j, i].axis("off")
     plt.tight_layout()
     plt.show()
-    filename = "mnist_diffusion_unet_quax_with_context_" + str(labels[context_ind]) + ".png"
+    filename = "mnist_diffusion_unet_with_context_" + str(labels[context_ind]) + ".png"
     plt.savefig(filename)

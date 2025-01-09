@@ -1,25 +1,3 @@
-"""
-import array
-import functools as ft
-import gzip
-import os
-import struct
-import urllib.request
-
-import diffrax as dfx  # https://github.com/patrick-kidger/diffrax
-import einops  # https://github.com/arogozhnikov/einops
-import equinox as eqx
-import jax
-import jax.numpy as jnp
-import jax.random as jr
-import matplotlib.pyplot as plt
-import optax  # https://github.com/deepmind/optax
-
-from jaxdiffusion.models.unet import UNet
-from jaxdiffusion.losses.score_matching_loss import make_step, single_loss_fn
-from jaxdiffusion.process.diffusion import VarExpBrownianMotion, ReverseProcess
-from jaxdiffusion.models.save_and_load import save, load
-"""
 from jaxdiffusion import *
 from jaxdiffusion.process.sampler import Sampler
 
@@ -66,36 +44,34 @@ unet_hyperparameters = {
     "data_shape": (1, 28, 28),      # Single-channel grayscale MNIST images
     "is_biggan": True,              # Whether to use BigGAN architecture
     "dim_mults": [1, 2, 4],         # Multiplicative factors for UNet feature map dimensions
-    "hidden_size": 16,              # Base hidden channel size
-    "heads": 8,                     # Number of attention heads
-    "dim_head": 7,                  # Size of each attention head
+    "hidden_size": 32,              # Base hidden channel size
+    "heads": 28,                     # Number of attention heads
+    "dim_head": 28,                 # Size of each attention head
     "num_res_blocks": 4,            # Number of residual blocks per stage
     "attn_resolutions": [28, 14]    # Resolutions for applying attention
 }
 
 key = jr.PRNGKey(seed)
 
-if os.path.exists("test_save.mo"):
-    print("Loading file test_save.mo")
-    model = load("test_save.mo", UNet)
-    print("Done Loading model")
+model_filename = "mnist_diffusion_unet.mo"
+if os.path.exists(model_filename):
+    print("Loading file " + model_filename)
+    model = load(model_filename, UNet)
+    model_hyperparameters = load_hyperparameters(model_filename)
+    print("Done Loading model with hyperparameters")
+    print(model_hyperparameters)
 else:
     print("File test_save.mo does not exist. Creating UNet")
     model = UNet(key = key, **unet_hyperparameters)
     print("Done Creating UNet")
 
 # Optimisation hyperparameters
-num_steps=0
+num_steps=100000
 lr=3e-4
-batch_size=32
+batch_size = 32*4
 print_every=100
-# Sampling hyperparameters
-dt0= 0.05
-sample_size=10
 # Seed
 seed=5678
-
-
 opt = optax.adam(lr)
 # Optax will update the floating-point JAX arrays in the model.
 opt_state = opt.init(eqx.filter(model, eqx.is_inexact_array))
@@ -103,7 +79,7 @@ opt_state = opt.init(eqx.filter(model, eqx.is_inexact_array))
 model_key, train_key, loader_key, sample_key = jr.split(key, 4) 
 
 total_value = 0
-sol = dfx.diffeqsolve(terms, solver, sampler.schedule.tmax, sampler.schedule.tmin, dt0=dt0, y0=y0[0, :])total_size = 0
+total_size = 0
 for step, data in zip(
     range(num_steps), dataloader(data, batch_size, key=loader_key)
 ):
@@ -116,8 +92,9 @@ for step, data in zip(
         print(f"Step={step} Loss={total_value / total_size}")
         total_value = 0
         total_size = 0
-        save("test_save.mo", unet_hyperparameters, model)
+        save(model_filename, unet_hyperparameters, model)
 
+save(model_filename, unet_hyperparameters, model)
 # Sampling
 data_shape = data[0, :, :, :].shape
 sampler = Sampler(schedule, model, data_shape)
@@ -136,5 +113,5 @@ plt.imshow(sample, cmap="Greys")
 plt.axis("off")
 plt.tight_layout()
 plt.show()
-filename = "mnist_diffusion_unet_quax.png"
+filename = "mnist_diffusion_unet.png"
 plt.savefig(filename)
