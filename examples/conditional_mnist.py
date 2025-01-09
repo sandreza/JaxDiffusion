@@ -5,6 +5,7 @@ def mnist():
     image_filename = "train-images-idx3-ubyte.gz"
     label_filename = "train-labels-idx1-ubyte.gz"
     url_dir = "https://storage.googleapis.com/cvdf-datasets/mnist"
+    # target_dir = os.getcwd() + "/data/mnist"
     target_dir = "/orcd/home/001/sandre/Repositories/JaxUvTest/data/mnist"
 
     # Download image data

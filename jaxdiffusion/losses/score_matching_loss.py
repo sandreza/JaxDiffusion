@@ -9,7 +9,7 @@ def single_loss_function(model, std, data, t, key):
     noise = jr.normal(key, data.shape)
     y = data + std * noise
     pred = model(t, y)
-    return jnp.mean((pred * std + noise  ) ** 2)
+    return jnp.mean((pred * std + noise) ** 2)
 
 @eqx.filter_jit
 def batch_loss_function(model, schedule, data, key):
