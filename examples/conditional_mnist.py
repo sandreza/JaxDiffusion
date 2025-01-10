@@ -55,7 +55,7 @@ random_index_2 = jax.random.randint(key, 10, 0, data.shape[0]-1)
 
 tmp = jnp.linalg.norm(data[random_index_1, 0, :, :] - data[random_index_2, 0, :, :], axis=(1, 2))
 sigma_max = max(tmp) 
-sigma_min = 1e-3
+sigma_min = 1e-2
 key, subkey = jax.random.split(key)
 schedule = VarianceExplodingBrownianMotion(sigma_min, sigma_max) 
 
