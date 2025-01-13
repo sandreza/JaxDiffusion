@@ -7,11 +7,12 @@ def downsampling_padding(dims, factor):
 
 def upsampling_padding(data_shape, factor):
     # (y + factor-1) // factor is the assumed size of the previously downscaled image
+    # the -y is to get the right padding size
     return tuple([0, factor * ((y + factor-1) // factor) - y] for y in data_shape[1:])  
 
 def smoothing_padding(dims, factor):
     left_pad  = (factor - 1)//2 
-    right_pad = (factor- 1)//2 + (factor - 1)%2
+    right_pad = (factor - 1)//2 + (factor - 1)%2
     return tuple(([left_pad, right_pad], ) * dims)
 
 # General Up and DownSampling

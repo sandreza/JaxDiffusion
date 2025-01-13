@@ -43,7 +43,7 @@ def conditional_single_loss_function(model, context_size, std, data, t, key):
     
     noise = jr.normal(key, data_shape)
     y = jnp.copy(data)
-    y = y.at[:-context_size, :, :].add(std * noise)
+    y = y.at[:-context_size, ...].add(std * noise)
     
     pred = model(t, y)
     return jnp.mean((pred * std + noise) ** 2)
