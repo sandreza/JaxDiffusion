@@ -33,7 +33,7 @@ class Sampler:
         
         score_model = ft.partial(score_model_precursor, model, data_shape)
         drift = ft.partial(drift_precursor, score_model, schedule)
-        diffusion = ft.partial(diffusion_precursor, schedule.sigma)
+        diffusion = ft.partial(diffusion_precursor, schedule.g)
         self.schedule = schedule
         self.score_model = score_model
         self.data_shape = data_shape
@@ -53,7 +53,7 @@ class Sampler:
     @eqx.filter_jit
     def sample(self, N, *, key = jr.PRNGKey(12345), steps = 300):
         subkey = jax.random.split(key, N)
-        y0 = jr.normal(subkey[0], (N, math.prod(self.data_shape))) * self.schedule.sigma_max 
+        y0 = jr.normal(subkey[0], (N, math.prod(self.data_shape))) * self.schedule.sigma(1.0) 
         dt0 = (self.schedule.tmin - self.schedule.tmax)/ steps
         desolver = ft.partial(self.precursor_desolver, dt0)
         samples = jax.vmap(desolver)(y0, subkey)
