@@ -12,6 +12,7 @@ import math
 import diffrax as dfx
 import functools as ft
 import jax.random as jr
+import lineax as lx
 
 class Sampler:
     def __init__(self, schedule, model, data_shape):
@@ -22,8 +23,8 @@ class Sampler:
             return s
         
         @eqx.filter_jit
-        def diffusion_precursor(sigma, t, y, args = None):
-            return sigma(t) * jnp.zeros(y.shape[0])
+        def diffusion_precursor(g, t, y, args = None):
+            return lx.DiagonalLinearOperator(g(t) * jnp.ones(y.shape[0]))
         
         @eqx.filter_jit
         def score_model_precursor(model, data_shape, t, y, args): 
