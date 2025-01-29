@@ -8,8 +8,8 @@ import functools as ft
 def single_loss_function(model, std, data, t, key):
     noise = jr.normal(key, data.shape)
     y = data + std * noise
-    pred = model(t, y)
-    return jnp.mean((pred * std + noise) ** 2)
+    nn = model(t, y)  # score = model(t, y) / sigma, but in loss its score * sigma
+    return jnp.mean((nn + noise) ** 2) # sigma cancels out 
 
 @eqx.filter_jit
 def batch_loss_function(model, schedule, data, key):
@@ -45,7 +45,7 @@ def conditional_single_loss_function(model, context_size, std, data, t, key):
     y = jnp.copy(data)
     y = y.at[:-context_size, ...].add(std * noise)
     
-    pred = model(t, y)
+    pred = model(t, y) / std
     return jnp.mean((pred * std + noise) ** 2)
 
 @eqx.filter_jit

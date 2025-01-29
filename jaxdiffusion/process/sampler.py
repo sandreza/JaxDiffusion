@@ -18,7 +18,7 @@ class Sampler:
         @eqx.filter_jit
         def drift_precursor(model, schedule, t, y, args):
             g2 = schedule.g2(t)
-            s = - g2 * model(t, y, None) 
+            s = - g2 * model(t, y, None) / schedule.sigma(t)
             return s
         
         @eqx.filter_jit
