@@ -12,6 +12,7 @@ dependencies = [
     "ipython>=8.18.1",
     "jax[cuda12-pip]>=0.4.30",
     "jaxlib>=0.4.30",
+    "lineax>=0.0.7",
     "matplotlib>=3.9.4",
     "numpy>=2.0.2",
     "optax>=0.2.4",
