@@ -18,7 +18,7 @@ class Sampler:
     def __init__(self, schedule, model, data_shape):
         @eqx.filter_jit
         def drift_precursor(model, schedule, t, y, args):
-            g2 = schedule.g2(t) 
+            g2 = schedule.sigma(t) ** 2
             s = - g2 * model(t, y, None) / schedule.sigma(t)
             return s
         
@@ -66,7 +66,7 @@ class ODESampler:
     def __init__(self, schedule, model, data_shape, * , solver = dfx.Tsit5()):
         @eqx.filter_jit
         def drift_precursor(model, schedule, t, y, args):
-            g2 = schedule.g2(t) 
+            g2 = schedule.sigma(t) ** 2
             s = - g2 * model(t, y, None) / schedule.sigma(t) / 2 
             return s
         
