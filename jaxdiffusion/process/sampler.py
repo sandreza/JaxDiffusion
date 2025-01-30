@@ -18,7 +18,7 @@ class Sampler:
     def __init__(self, schedule, model, data_shape):
         @eqx.filter_jit
         def drift_precursor(model, schedule, t, y, args):
-            g2 = schedule.g2(t)
+            g2 = schedule.g2(t) 
             s = - g2 * model(t, y, None) / schedule.sigma(t)
             return s
         
@@ -56,6 +56,45 @@ class Sampler:
         subkey = jax.random.split(key, N)
         y0 = jr.normal(subkey[0], (N, math.prod(self.data_shape))) * self.schedule.sigma(1.0) 
         dt0 = (self.schedule.tmin - self.schedule.tmax)/ steps
+        desolver = ft.partial(self.precursor_desolver, dt0)
+        samples = jax.vmap(desolver)(y0, subkey)
+        samples = jnp.reshape(samples, (N,  *self.data_shape))
+        return samples
+    
+
+class ODESampler:
+    def __init__(self, schedule, model, data_shape, * , solver = dfx.Tsit5()):
+        @eqx.filter_jit
+        def drift_precursor(model, schedule, t, y, args):
+            g2 = schedule.g2(t) 
+            s = - g2 * model(t, y, None) / schedule.sigma(t) / 2 
+            return s
+        
+        @eqx.filter_jit
+        def score_model_precursor(model, data_shape, t, y, args): 
+            yr = jnp.reshape(y, data_shape)
+            s = model(t, yr)
+            return jnp.reshape(s, (math.prod(data_shape)))
+        
+        score_model = ft.partial(score_model_precursor, model, data_shape)
+        drift = ft.partial(drift_precursor, score_model, schedule)
+        self.schedule = schedule
+        self.score_model = score_model
+        self.data_shape = data_shape
+        self.drift = drift
+        self.solver = solver
+
+    @eqx.filter_jit
+    def precursor_desolver(self, dt0, y0, key):
+        f = dfx.ODETerm(self.drift)
+        sol = dfx.diffeqsolve(f, self.solver, self.schedule.tmax, self.schedule.tmin, dt0=dt0, y0=y0)
+        return sol.ys
+    
+    @eqx.filter_jit
+    def sample(self, N, *, key = jr.PRNGKey(12345), steps = 300):
+        subkey = jax.random.split(key, N)
+        y0 = jr.normal(subkey[0], (N, math.prod(self.data_shape))) * self.schedule.sigma(1.0) 
+        dt0 = (self.schedule.tmin - self.schedule.tmax)/steps
         desolver = ft.partial(self.precursor_desolver, dt0)
         samples = jax.vmap(desolver)(y0, subkey)
         samples = jnp.reshape(samples, (N,  *self.data_shape))
