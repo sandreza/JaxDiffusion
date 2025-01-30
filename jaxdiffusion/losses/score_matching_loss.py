@@ -20,7 +20,7 @@ def batch_loss_function(model, schedule, data, key):
     t0 = schedule.tmin
     t1 = jnp.array([1.0])
     t = jr.uniform(tkey, (batch_size,), minval=t0, maxval=t1)
-    sigmas = jax.vmap(schedule.g)(t)
+    sigmas = jax.vmap(schedule.sigma)(t)
 
     loss_function = ft.partial(single_loss_function, model)
     loss_function = jax.vmap(loss_function)
@@ -57,7 +57,7 @@ def conditional_batch_loss_function(model, context_size, schedule, data, key):
     t0 = schedule.tmin
     t1 = jnp.array([1.0])
     t = jr.uniform(tkey, (batch_size,), minval=t0, maxval=t1)
-    sigmas = jax.vmap(schedule.g)(t)
+    sigmas = jax.vmap(schedule.sigma)(t)
 
     loss_function = ft.partial(conditional_single_loss_function, model, context_size)
     loss_function = jax.vmap(loss_function)
