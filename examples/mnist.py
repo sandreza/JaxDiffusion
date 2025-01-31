@@ -49,8 +49,8 @@ unet_hyperparameters = {
     "kernel_size": 3, 
     "beforeblock_length": 1,
     "afterblock_length": 1,
-    "final_block_length": 0,
     "midblock_length": 2,
+    "final_block_length": 0,
 }
 #beforeblock_length = 0, afterblock_length = 0, midblock_length = 2,
 key = jr.PRNGKey(seed)
@@ -105,7 +105,7 @@ test_value = 0
 total_test_size = 0
 losses = []
 test_losses = []
-epochs = 50
+epochs = 100
 
 for epoch in range(epochs):
     _, subkey, subkey2, subkey3 = jax.random.split(subkey, 4)
@@ -160,7 +160,7 @@ _, _, subkey = jax.random.split(subkey, 3)
 data_shape = data[0, :, :, :].shape
 sampler = ODESampler(schedule, model, data_shape)
 sqrt_N = 10
-samples = sampler.sample(sqrt_N**2, key = subkey, steps = 10)
+samples = sampler.sample(sqrt_N**2, key = subkey, steps = 300)
 
 # plotting
 sample = jnp.reshape(samples, (sqrt_N, sqrt_N, 28, 28))

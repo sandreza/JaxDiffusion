@@ -79,7 +79,7 @@ unet_hyperparameters = {
     "data_shape": data_shape,
     "features": [32, 64],
     "downscaling_factor": 2,
-    "kernel_size": 3, 
+    "kernel_size": [5, 3], 
     "beforeblock_length": 1,
     "afterblock_length": 1,
     "final_block_length": 0,
@@ -132,7 +132,7 @@ test_value = 0
 total_test_size = 0
 losses = []
 test_losses = []
-epochs = 50
+epochs = 100
 for epoch in range(epochs):
     _, subkey, subkey2, subkey3 = jax.random.split(subkey, 4)
     perm_train = jax.random.permutation(subkey, train_size)
