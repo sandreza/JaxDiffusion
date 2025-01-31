@@ -7,8 +7,8 @@ def mnist():
     image_filename = "train-images-idx3-ubyte.gz"
     label_filename = "train-labels-idx1-ubyte.gz"
     url_dir = "https://storage.googleapis.com/cvdf-datasets/mnist"
-    target_dir = os.getcwd() + "/data/mnist"
-    # target_dir = "/orcd/home/001/sandre/Repositories/JaxUvTest/data/mnist"
+    # target_dir = os.getcwd() + "/data/mnist"
+    target_dir = "/orcd/home/001/sandre/Repositories/JaxUvTest/data/mnist"
 
     # Download image data
     image_url = f"{url_dir}/{image_filename}"
@@ -132,7 +132,7 @@ test_value = 0
 total_test_size = 0
 losses = []
 test_losses = []
-epochs = 200
+epochs = 50
 for epoch in range(epochs):
     _, subkey, subkey2, subkey3 = jax.random.split(subkey, 4)
     perm_train = jax.random.permutation(subkey, train_size)
@@ -207,7 +207,7 @@ for ii in range(10):
                 axes[j, i].axis("off")
     plt.tight_layout()
     plt.show()
-    filename = "mnist_diffusion_unet_with_context_" + str(labels[context_ind]) + "_ode.png"
+    filename = "mnist_diffusion_unet_with_context_" + str(labels[context_ind]) + "_sde.png"
     plt.savefig(filename)
 
 
@@ -246,5 +246,5 @@ for ii in range(10):
                 axes[j, i].axis("off")
     plt.tight_layout()
     plt.show()
-    filename = "mnist_diffusion_unet_with_context_" + str(labels[context_ind]) + "_sde.png"
+    filename = "mnist_diffusion_unet_with_context_" + str(labels[context_ind]) + "_ode.png"
     plt.savefig(filename)
