@@ -18,4 +18,3 @@ def load_hyperparameters(filename):
     with open(filename, "rb") as f:
         hyperparams = json.loads(f.readline().decode())
         return hyperparams
-

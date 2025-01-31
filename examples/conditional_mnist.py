@@ -1,12 +1,14 @@
 from jaxdiffusion import *
 from jaxdiffusion.process.sampler import Sampler
+from jaxdiffusion.process.sampler import ODESampler
+from jaxdiffusion.models.unet import UNet
 
 def mnist():
     image_filename = "train-images-idx3-ubyte.gz"
     label_filename = "train-labels-idx1-ubyte.gz"
     url_dir = "https://storage.googleapis.com/cvdf-datasets/mnist"
-    # target_dir = os.getcwd() + "/data/mnist"
-    target_dir = "/orcd/home/001/sandre/Repositories/JaxUvTest/data/mnist"
+    target_dir = os.getcwd() + "/data/mnist"
+    # target_dir = "/orcd/home/001/sandre/Repositories/JaxUvTest/data/mnist"
 
     # Download image data
     image_url = f"{url_dir}/{image_filename}"
@@ -71,17 +73,18 @@ for label in range(10):
 # Loss Function assumes that all context channels are the last indices of the "channel" dimension
 seed = 12345
 data_shape = conditional_data.shape[1:]
-context_size = 1
+context_channels = 1
 unet_hyperparameters = {
-    "data_shape": data_shape,        # grayscale MNIST images with a "context" channel
-    "is_biggan": True,               # Whether to use BigGAN architecture
-    "dim_mults": [1, 2, 4],          # Multiplicative factors for UNet feature map dimensions
-    "hidden_size": 32,               # Base hidden channel size
-    "heads": 28,                     # Number of attention heads
-    "dim_head": 28,                  # Size of each attention head
-    "num_res_blocks": 4,             # Number of residual blocks per stage
-    "attn_resolutions": [28, 14, 7], # Resolutions for applying attention
-    "context_size": context_size,    # context dimension
+    "context_channels": 0,
+    "data_shape": data_shape,
+    "features": [32, 64],
+    "downscaling_factor": 2,
+    "kernel_size": 3, 
+    "beforeblock_length": 1,
+    "afterblock_length": 1,
+    "final_block_length": 0,
+    "midblock_length": 2,
+    "context_channels": context_channels, 
 }
 
 key = jr.PRNGKey(seed)
@@ -111,45 +114,51 @@ test_indices = perm[train_size:]
 train_data = conditional_data[train_indices, :, :, :]
 test_data = conditional_data[test_indices, :, :, :]
 
-# Create DataLoaders
-subkey = jax.random.split(subkey)[1]
-batchsize = 32 * 4
-train_dataloader = dataloader(train_data, batchsize, subkey)
-test_dataloader = dataloader(test_data, batchsize, subkey)
-
-# Optimisation hyperparameters
-num_steps= 100000
-lr=3e-4
-batch_size=32
-print_every=100
-# Sampling hyperparameters
-dt0= 0.05
-sample_size=10
-# Seed
-seed=5678
+# batch and permutation looping
+train_size = train_data.shape[0]
+test_size = test_data.shape[0]
+batch_size = 32 * 4
+train_skip_size = train_size // batch_size
+test_skip_size = test_size // batch_size
 
 # Training
+lr=1e-3
 opt = optax.adam(lr)
 opt_state = opt.init(eqx.filter(model, eqx.is_inexact_array))
 model_key, train_key, test_key, loader_key, sample_key = jr.split(key, 5) 
-
 total_value = 0
 total_size = 0
 test_value = 0
-for step, data, test_data in zip(range(num_steps), dataloader(train_data, batch_size, key=loader_key), dataloader(test_data, batch_size, key=loader_key)):
-    value, model, train_key, opt_state = conditional_make_step(
-        model, context_size, schedule, data, train_key, opt_state, opt.update
-    )
-    total_value += value.item()
-    test_value += conditional_batch_loss_function(model, context_size, schedule, test_data, test_key)
-    total_size += 1
-    if (step % print_every) == 0 or step == num_steps - 1:
-        print(f"Step={step} Loss={total_value / total_size}")
-        print(f"Test Loss={test_value / total_size}")
-        total_value = 0
-        test_value = 0
-        total_size = 0
-        save(model_filename, unet_hyperparameters, model)
+total_test_size = 0
+losses = []
+test_losses = []
+epochs = 200
+for epoch in range(epochs):
+    _, subkey, subkey2, subkey3 = jax.random.split(subkey, 4)
+    perm_train = jax.random.permutation(subkey, train_size)
+    perm_test  = jax.random.permutation(subkey2, test_size)
+    for chunk in range(train_skip_size-1):
+        _, train_key = jax.random.split(train_key)
+        tr_data = train_data[perm_train[chunk*batch_size:(chunk+1)*batch_size], :, :, :]
+        value, model, train_key, opt_state = conditional_make_step(
+            model, context_channels, schedule, tr_data, train_key, opt_state, opt.update
+        )
+        total_value += value.item()
+        total_size += 1
+    for chunk in range(test_skip_size-1):
+        _, test_key = jax.random.split(test_key)
+        tst_data = test_data[perm_test[chunk*batch_size:(chunk+1)*batch_size], :, :, :]
+        test_value += conditional_batch_loss_function(model, context_channels, schedule, tst_data, test_key)
+        total_test_size += 1
+    print(f"------Epoch={epoch}------")
+    print(f"Loss={total_value / total_size}")
+    print(f"Test Loss={test_value / total_test_size}")
+    total_value = 0
+    total_size = 0
+    test_value = 0
+    total_test_size = 0
+    save(model_filename, unet_hyperparameters, model)
+
 
 save(model_filename, unet_hyperparameters, model)
 
@@ -174,7 +183,7 @@ for ii in range(10):
     data_shape = conditional_data[0, 0:1, :, :].shape
     sampler = Sampler(schedule, context_model, data_shape)
     sqrt_N = 10
-    samples = sampler.sample(sqrt_N**2, steps = 100)
+    samples = sampler.sample(sqrt_N**2, steps = 300)
     print("Done Sampling, Now Plotting")
     # plotting
     sample = jnp.reshape(samples, (sqrt_N, sqrt_N, 28, 28))
@@ -198,5 +207,44 @@ for ii in range(10):
                 axes[j, i].axis("off")
     plt.tight_layout()
     plt.show()
-    filename = "mnist_diffusion_unet_with_context_" + str(labels[context_ind]) + ".png"
+    filename = "mnist_diffusion_unet_with_context_" + str(labels[context_ind]) + "_ode.png"
+    plt.savefig(filename)
+
+
+for ii in range(10):
+    context_ind = first_indices[ii]
+    context = conditional_data[context_ind, 1:, :, :]
+    tmp = jnp.zeros((1, 28, 28))
+    context_model = ft.partial(precursor_context_model, model, context)
+
+    # Sampling
+    print("Sampling " + str(labels[context_ind]))
+    data_shape = conditional_data[0, 0:1, :, :].shape
+    sampler = ODESampler(schedule, context_model, data_shape)
+    sqrt_N = 10
+    samples = sampler.sample(sqrt_N**2, steps = 300)
+    print("Done Sampling, Now Plotting")
+    # plotting
+    sample = jnp.reshape(samples, (sqrt_N, sqrt_N, 28, 28))
+    sample = data_mean + data_std * sample
+    sample = jnp.clip(sample, data_min, data_max)
+
+    conditional_information = context * data_std + data_mean 
+    conditional_information = jnp.clip(conditional_information, data_min, data_max)
+
+    fig, axes = plt.subplots(sqrt_N, sqrt_N, figsize=(sqrt_N, sqrt_N))
+    # Plot the original images (0 index of axis 1)
+    for i in range(sqrt_N):
+        for j in range(sqrt_N):
+            if i == j == 0: 
+                axes[j, i].imshow(context[0, :, :], cmap="Greys")
+                axes[j, i].set_title(f"Context")
+                axes[j, i].axis("off")
+            else:
+                axes[j, i].imshow(sample[i, j, :, :], cmap="Greys")
+                axes[j, i].set_title(f"{i}, {j}")
+                axes[j, i].axis("off")
+    plt.tight_layout()
+    plt.show()
+    filename = "mnist_diffusion_unet_with_context_" + str(labels[context_ind]) + "_sde.png"
     plt.savefig(filename)

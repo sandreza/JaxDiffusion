@@ -13,6 +13,7 @@ import jax.numpy as jnp
 import jax.random as jr
 import matplotlib.pyplot as plt
 import optax
+import jax.tree_util as jtu
 
 from .models.unet import UNet
 from .losses.score_matching_loss import make_step, single_loss_function, batch_loss_function

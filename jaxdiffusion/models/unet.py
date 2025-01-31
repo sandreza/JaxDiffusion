@@ -6,10 +6,28 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.random as jr
-from einops import rearrange
 
-# modified from: https://github.com/patrick-kidger/equinox/blob/main/examples/unet.ipynb
-class SinusoidalPosEmb(eqx.Module):
+# Utility functions
+def downsampling_padding(dims, factor):
+    return tuple(([0, factor - 1], ) * dims)
+
+def upsampling_padding(data_shape, factor):
+    # (y + factor-1) // factor is the assumed size of the previously downscaled image
+    # the -y is to get the right padding size
+    return tuple([0, factor * ((y + factor-1) // factor) - y] for y in data_shape[1:])  
+
+def phf(y, factor, kernel_size):
+    return factor * ((y + factor-1) // factor) - y
+
+def upsampling_padding_two(data_shape, factor, kernel_size):
+    return tuple([phf(y, factor, kernel_size) // 2 + (phf(y, factor, kernel_size) - 1) % 2, phf(y, factor, kernel_size) // 2] for y in data_shape[1:])  
+
+def smoothing_padding(dims, factor):
+    left_pad  = (factor - 1)//2 
+    right_pad = (factor - 1)//2 + (factor - 1)%2
+    return tuple(([left_pad, right_pad], ) * dims)
+
+class GaussianFourierProjection(eqx.Module):
     emb: jax.Array
 
     def __init__(self, dim):
@@ -22,428 +40,225 @@ class SinusoidalPosEmb(eqx.Module):
         emb = jnp.concatenate((jnp.sin(emb), jnp.cos(emb)), axis=-1)
         return emb
 
-class LinearTimeSelfAttention(eqx.Module):
-    group_norm: eqx.nn.GroupNorm
-    heads: int
-    to_qkv: eqx.nn.Conv2d
-    to_out: eqx.nn.Conv2d
-
-    def __init__(
-        self,
-        dim,
-        key,
-        heads=4,
-        dim_head=32,
-    ):
-        keys = jax.random.split(key, 2)
-        self.group_norm = eqx.nn.GroupNorm(min(dim // 4, 32), dim)
-        self.heads = heads
-        hidden_dim = dim_head * heads
-        self.to_qkv = eqx.nn.Conv2d(dim, hidden_dim * 3, 1, key=keys[0])
-        self.to_out = eqx.nn.Conv2d(hidden_dim, dim, 1, key=keys[1])
-
-    def __call__(self, x):
-        c, h, w = x.shape
-        x = self.group_norm(x)
-        qkv = self.to_qkv(x)
-        q, k, v = rearrange(
-            qkv, "(qkv heads c) h w -> qkv heads c (h w)", heads=self.heads, qkv=3
-        )
-        k = jax.nn.softmax(k, axis=-1)
-        context = jnp.einsum("hdn,hen->hde", k, v)
-        out = jnp.einsum("hde,hdn->hen", context, q)
-        out = rearrange(
-            out, "heads c (h w) -> (heads c) h w", heads=self.heads, h=h, w=w
-        )
-        return self.to_out(out)
-
-
-def upsample_2d(y, factor=2):
-    C, H, W = y.shape
-    y = jnp.reshape(y, [C, H, 1, W, 1])
-    y = jnp.tile(y, [1, 1, factor, 1, factor])
-    return jnp.reshape(y, [C, H * factor, W * factor])
-
-
-def downsample_2d(y, factor=2):
-    C, H, W = y.shape
-    y = jnp.reshape(y, [C, H // factor, factor, W // factor, factor])
-    return jnp.mean(y, axis=[2, 4])
-
-
-def exact_zip(*args):
-    _len = len(args[0])
-    for arg in args:
-        assert len(arg) == _len
-    return zip(*args)
-
-
-def key_split_allowing_none(key):
-    if key is None:
-        return key, None
-    else:
-        return jr.split(key)
-
-
-class Residual(eqx.Module):
-    fn: LinearTimeSelfAttention
-
-    def __init__(self, fn):
-        self.fn = fn
-
-    def __call__(self, x, *args, **kwargs):
-        return self.fn(x, *args, **kwargs) + x
-
+class ConvBlock(eqx.Module):
+    norm: eqx.nn.GroupNorm
+    conv: eqx.nn.Conv
+    def __init__(self, *,  dims, kernel_size=3, padding_mode = 'REPLICATE', min_group_norm_channel = 32, in_channels, out_channels, key = jr.PRNGKey(0)):
+        key1, key2, key3 = jr.split(key, 3)
+        padding = smoothing_padding(dims, kernel_size)
+        self.norm = eqx.nn.GroupNorm(min(in_channels//4, min_group_norm_channel), in_channels)
+        self.conv = eqx.nn.Conv(dims, in_channels, out_channels, kernel_size=kernel_size, padding=padding, padding_mode=padding_mode, key=key2)
+    def __call__(self, x): 
+        h = self.norm(x)
+        h = jax.nn.silu(h)
+        h = self.conv(h)
+        return h
 
 class ResnetBlock(eqx.Module):
-    dim_out: int
-    is_biggan: bool
-    up: bool
-    down: bool
-    time_emb_dim: int
-    mlp_layers: list[Union[Callable, eqx.nn.Linear]]
-    scaling: Union[None, Callable, eqx.nn.ConvTranspose2d, eqx.nn.Conv2d]
-    block1_groupnorm: eqx.nn.GroupNorm
-    block1_conv: eqx.nn.Conv2d
-    block2_layers: list[
-        Union[eqx.nn.GroupNorm, eqx.nn.Conv2d, Callable]
-    ]
-    res_conv: eqx.nn.Conv2d
-    attn: Optional[Residual]
+    conv_block1: ConvBlock
+    conv_block2: ConvBlock
+    conv: eqx.nn.Conv
+    linear: eqx.nn.Linear
+    def __init__(self, *, dims = 2, kernel_size=3, padding_mode = 'REPLICATE', min_group_norm_channel = 32, in_channels, out_channels, embed_dim=256, key = jr.PRNGKey(0)):
+        key1, key2, key3, key4 = jr.split(key, 4)
+        self.conv_block1 = ConvBlock(dims = dims, kernel_size=kernel_size, padding_mode = padding_mode, min_group_norm_channel = min_group_norm_channel, in_channels = in_channels, out_channels = out_channels, key = key1)
+        self.conv_block2 = ConvBlock(dims = dims, kernel_size=kernel_size, padding_mode = padding_mode, min_group_norm_channel = min_group_norm_channel, in_channels = out_channels, out_channels = out_channels, key = key2)
+        self.conv = eqx.nn.Conv(dims, in_channels, out_channels, kernel_size = 1, key = key3)
+        self.linear = eqx.nn.Linear(embed_dim, out_channels, key=key4)
+    def __call__(self, t, x):
+        h = self.conv_block1(x)
+        t = self.linear(jax.nn.silu(t))
+        h = h + jnp.expand_dims(t, axis=tuple(range(1, h.ndim)))
+        h = self.conv_block2(h)
+        h = h + self.conv(x)
+        return h
+    
+class ResnetBlockDown(eqx.Module):
+    norm1: eqx.nn.GroupNorm
+    conv1: ConvBlock
+    down: eqx.nn.Conv
+    conv_block2: ConvBlock
+    conv: eqx.nn.Conv
+    linear: eqx.nn.Linear
+    def __init__(self, *, dims = 2, kernel_size=3, padding_mode = 'REPLICATE', min_group_norm_channel = 32, in_channels, out_channels, embed_dim=256, key = jr.PRNGKey(0)):
+        key0, key1, key2, key3, key4 = jr.split(key, 5)
+        padding = smoothing_padding(dims, kernel_size)
+        self.down = eqx.nn.Conv(dims, in_channels, in_channels, kernel_size=3, stride=2, padding=1, key=key0)
+        self.norm1 = eqx.nn.GroupNorm(min(in_channels//4, min_group_norm_channel), in_channels)
+        self.conv1 = eqx.nn.Conv(dims, in_channels, out_channels, kernel_size=kernel_size, padding=padding, padding_mode=padding_mode, key=key1)
+        self.conv_block2 = ConvBlock(dims = dims, kernel_size=kernel_size, padding_mode = padding_mode, min_group_norm_channel = min_group_norm_channel, in_channels = out_channels, out_channels = out_channels, key = key2)
+        self.conv = eqx.nn.Conv(dims, in_channels, out_channels, kernel_size = 1, key = key3)
+        self.linear = eqx.nn.Linear(embed_dim, out_channels, key=key4)
+    def __call__(self, t, x):
+        h = jax.nn.silu(self.norm1(x))
+        h = self.down(h)
+        x = self.down(x)
+        x = self.conv(x)
+        h = self.conv1(h)
+        t = self.linear(jax.nn.silu(t))
+        h = h + jnp.expand_dims(t, axis=tuple(range(1, h.ndim)))
+        h = self.conv_block2(h)
+        h = h + x
+        return h
 
-    def __init__(
-        self,
-        dim_in,
-        dim_out,
-        is_biggan,
-        up,
-        down,
-        time_emb_dim,
-        is_attn,
-        heads,
-        dim_head,
-        *,
-        key,
-    ):
-        keys = jax.random.split(key, 7)
-        self.dim_out = dim_out
-        self.is_biggan = is_biggan
-        self.up = up
-        self.down = down
-        self.time_emb_dim = time_emb_dim
-
-        self.mlp_layers = [
-            jax.nn.silu,
-            eqx.nn.Linear(time_emb_dim, dim_out, key=keys[0]),
-        ]
-        self.block1_groupnorm = eqx.nn.GroupNorm(min(dim_in // 4, 32), dim_in)
-        self.block1_conv = eqx.nn.Conv2d(dim_in, dim_out, 3, padding=1, key=keys[1])
-        self.block2_layers = [
-            eqx.nn.GroupNorm(min(dim_out // 4, 32), dim_out),
-            jax.nn.silu,
-            eqx.nn.Conv2d(dim_out, dim_out, 3, padding=1, key=keys[2]),
-        ]
-
-        assert not self.up or not self.down
-
-        if is_biggan:
-            if self.up:
-                self.scaling = upsample_2d
-            elif self.down:
-                self.scaling = downsample_2d
-            else:
-                self.scaling = None
-        else:
-            if self.up:
-                self.scaling = eqx.nn.ConvTranspose2d(
-                    dim_in,
-                    dim_in,
-                    kernel_size=4,
-                    stride=2,
-                    padding=1,
-                    key=keys[3],
-                )
-            elif self.down:
-                self.scaling = eqx.nn.Conv2d(
-                    dim_in,
-                    dim_in,
-                    kernel_size=3,
-                    stride=2,
-                    padding=1,
-                    key=keys[4],
-                )
-            else:
-                self.scaling = None
-        # For DDPM Yang use their own custom layer called NIN, which is
-        # equivalent to a 1x1 conv
-        self.res_conv = eqx.nn.Conv2d(dim_in, dim_out, kernel_size=1, key=keys[5])
-
-        if is_attn:
-            self.attn = Residual(
-                LinearTimeSelfAttention(
-                    dim_out,
-                    heads=heads,
-                    dim_head=dim_head,
-                    key=keys[6],
-                )
-            )
-        else:
-            self.attn = None
-
-    def __call__(self, x, t, *, key):
-        C, _, _ = x.shape
-        # In DDPM, each set of resblocks ends with an up/down sampling. In
-        # biggan there is a final resblock after the up/downsampling. In this
-        # code, the biggan approach is taken for both.
-        # norm -> nonlinearity -> up/downsample -> conv follows Yang
-        # https://github.dev/yang-song/score_sde/blob/main/models/layerspp.py
-        h = jax.nn.silu(self.block1_groupnorm(x))
-        if self.up or self.down:
-            h = self.scaling(h)  # pyright: ignore
-            x = self.scaling(x)  # pyright: ignore
-        h = self.block1_conv(h)
-
-        for layer in self.mlp_layers:
-            t = layer(t)
-        h = h + t[..., None, None]
-        for layer in self.block2_layers:
-            h = layer(h)
-
-        if C != self.dim_out or self.up or self.down:
-            x = self.res_conv(x)
-
-        out = (h + x) / jnp.sqrt(2)
-        if self.attn is not None:
-            out = self.attn(out)
-        return out
-
-
+class ResnetBlockUp(eqx.Module):
+    norm1: eqx.nn.GroupNorm
+    conv1: ConvBlock
+    up: eqx.nn.ConvTranspose
+    conv_block2: ConvBlock
+    conv: eqx.nn.Conv
+    linear: eqx.nn.Linear
+    def __init__(self, *, dims = 2, kernel_size=3, padding_mode = 'REPLICATE', min_group_norm_channel = 32, in_channels, out_channels, embed_dim=256, key = jr.PRNGKey(0)):
+        key0, key1, key2, key3, key4 = jr.split(key, 5)
+        padding = smoothing_padding(dims, kernel_size)
+        self.up = eqx.nn.ConvTranspose(dims, in_channels, in_channels, kernel_size=4, stride=2, padding=1, key=key0)
+        self.norm1 = eqx.nn.GroupNorm(min(in_channels//4, min_group_norm_channel), in_channels)
+        self.conv1 = eqx.nn.Conv(dims, in_channels, out_channels, kernel_size=kernel_size, padding=padding, padding_mode=padding_mode, key=key1)
+        self.conv_block2 = ConvBlock(dims = dims, kernel_size=kernel_size, padding_mode = padding_mode, min_group_norm_channel = min_group_norm_channel, in_channels = out_channels, out_channels = out_channels, key = key2)
+        self.conv = eqx.nn.Conv(dims, in_channels, out_channels, kernel_size = 1, key = key3)
+        self.linear = eqx.nn.Linear(embed_dim, out_channels, key=key4)
+    def __call__(self, t, x):
+        h = jax.nn.silu(self.norm1(x))
+        h = self.up(h)
+        x = self.up(x)
+        x = self.conv(x)
+        h = self.conv1(h)
+        t = self.linear(jax.nn.silu(t))
+        h = h + jnp.expand_dims(t, axis=tuple(range(1, h.ndim)))
+        h = self.conv_block2(h)
+        h = h + x
+        return h
+    
 class UNet(eqx.Module):
-    time_pos_emb: SinusoidalPosEmb
+    gfp: GaussianFourierProjection
     mlp: eqx.nn.MLP
-    first_conv: eqx.nn.Conv2d
-    down_res_blocks: list[list[ResnetBlock]]
-    mid_block1: ResnetBlock
-    mid_block2: ResnetBlock
-    ups_res_blocks: list[list[ResnetBlock]]
-    final_conv_layers: list[Union[Callable, eqx.nn.LayerNorm, eqx.nn.Conv2d]]
+    conv: eqx.nn.Conv
+    downblock: list[ResnetBlockDown]
+    upblock: list[ResnetBlockUp]
+    upresblock: list[ResnetBlock]
+    downfeatureblock: list[ResnetBlock]
+    upfeatureblock: list[ResnetBlock]
+    downfeatureblock: list[ResnetBlock]
+    upblockbefore: list[list[ResnetBlock]]
+    upblockafter: list[list[ResnetBlock]]
+    downblockbefore: list[list[ResnetBlock]]
+    downblockafter: list[list[ResnetBlock]]
+    midblock: list[ResnetBlock]
+    upfeatureblock_reduce: list[ResnetBlock]
+    finalblock: list[ResnetBlock]
+    resblock: ResnetBlock
+    block: ConvBlock
+    def __init__(self, *, context_channels=0, beforeblock_length = 0, afterblock_length = 0, midblock_length = 2, final_block_length = 0, kernel_size = 3, data_shape, features=[32, 64, 128], downscaling_factor=2, key=jr.PRNGKey(0)):
+        in_channels = data_shape[0]
+        out_channels = in_channels - context_channels
+        dims = len(data_shape) - 1
+        padding_mode = 'REPLICATE'
+        padding_mode_up = 'ZEROS'
+        emb_dim = features[0]
+        min_group_norm = features[0]
+        keys = jr.split(key, 12)
+        if type(kernel_size) == int:
+            kernel_size = [kernel_size for _ in features]
+        assert len(kernel_size) == len(features), "Kernel size must be the same length as feature factors"
+        if type(downscaling_factor) == int:
+            downscaling_factors = [downscaling_factor]
+            for i in range(len(features)-2):
+                downscaling_factors.append(downscaling_factor)
+        assert (len(downscaling_factors)+1) == len(features), "Downscaling factors must be one less than feature factors"
+        data_shapes = [data_shape]
+        for i in range(len(features)-2):
+            data_shapes.append(tuple([features[i]] + [(x + downscaling_factors[i] - 1 ) // downscaling_factors[i] for x in data_shapes[i][1:]]))
+        data_shapes = data_shapes[::-1]
 
-    def __init__(
-        self,
-        *,
-        data_shape: tuple[int, int, int],
-        is_biggan: bool,
-        dim_mults: list[int],
-        hidden_size: int,
-        heads: int,
-        dim_head: int,
-        num_res_blocks: int,
-        attn_resolutions: list[int],
-        context_size: int = 0, 
-        key,
-    ):
-        keys = jax.random.split(key, 7)
-        del key
-
-        data_channels, in_height, in_width = data_shape
-
-        dims = [hidden_size] + [hidden_size * m for m in dim_mults]
-        in_out = list(exact_zip(dims[:-1], dims[1:]))
-
-        self.time_pos_emb = SinusoidalPosEmb(hidden_size)
-        self.mlp = eqx.nn.MLP(
-            hidden_size,
-            hidden_size,
-            4 * hidden_size,
-            1,
-            activation=jax.nn.silu,
-            key=keys[0],
-        )
-        self.first_conv = eqx.nn.Conv2d(
-            data_channels, hidden_size, kernel_size=3, padding=1, key=keys[1]
-        )
-
-        h, w = in_height, in_width
-        self.down_res_blocks = []
-        num_keys = len(in_out) * num_res_blocks - 1
-        keys_resblock = jr.split(keys[2], num_keys)
-        i = 0
-        for ind, (dim_in, dim_out) in enumerate(in_out):
-            if h in attn_resolutions and w in attn_resolutions:
-                is_attn = True
-            else:
-                is_attn = False
-            res_blocks = [
-                ResnetBlock(
-                    dim_in=dim_in,
-                    dim_out=dim_out,
-                    is_biggan=is_biggan,
-                    up=False,
-                    down=False,
-                    time_emb_dim=hidden_size,
-                    is_attn=is_attn,
-                    heads=heads,
-                    dim_head=dim_head,
-                    key=keys_resblock[i],
-                )
-            ]
-            i += 1
-            for _ in range(num_res_blocks - 2):
-                res_blocks.append(
-                    ResnetBlock(
-                        dim_in=dim_out,
-                        dim_out=dim_out,
-                        is_biggan=is_biggan,
-                        up=False,
-                        down=False,
-                        time_emb_dim=hidden_size,
-                        is_attn=is_attn,
-                        heads=heads,
-                        dim_head=dim_head,
-                        key=keys_resblock[i],
-                    )
-                )
-                i += 1
-            if ind < (len(in_out) - 1):
-                res_blocks.append(
-                    ResnetBlock(
-                        dim_in=dim_out,
-                        dim_out=dim_out,
-                        is_biggan=is_biggan,
-                        up=False,
-                        down=True,
-                        time_emb_dim=hidden_size,
-                        is_attn=is_attn,
-                        heads=heads,
-                        dim_head=dim_head,
-                        key=keys_resblock[i],
-                    )
-                )
-                i += 1
-                h, w = h // 2, w // 2
-            self.down_res_blocks.append(res_blocks)
-        assert i == num_keys
-
-        mid_dim = dims[-1]
-        self.mid_block1 = ResnetBlock(
-            dim_in=mid_dim,
-            dim_out=mid_dim,
-            is_biggan=is_biggan,
-            up=False,
-            down=False,
-            time_emb_dim=hidden_size,
-            is_attn=True,
-            heads=heads,
-            dim_head=dim_head,
-            key=keys[3],
-        )
-        self.mid_block2 = ResnetBlock(
-            dim_in=mid_dim,
-            dim_out=mid_dim,
-            is_biggan=is_biggan,
-            up=False,
-            down=False,
-            time_emb_dim=hidden_size,
-            is_attn=False,
-            heads=heads,
-            dim_head=dim_head,
-            key=keys[4],
-        )
-
-        self.ups_res_blocks = []
-        num_keys = len(in_out) * (num_res_blocks + 1) - 1
-        keys_resblock = jr.split(keys[5], num_keys)
-        i = 0
-        for ind, (dim_in, dim_out) in enumerate(reversed(in_out)):
-            if h in attn_resolutions and w in attn_resolutions:
-                is_attn = True
-            else:
-                is_attn = False
-            res_blocks = []
-            for _ in range(num_res_blocks - 1):
-                res_blocks.append(
-                    ResnetBlock(
-                        dim_in=dim_out * 2,
-                        dim_out=dim_out,
-                        is_biggan=is_biggan,
-                        up=False,
-                        down=False,
-                        time_emb_dim=hidden_size,
-                        is_attn=is_attn,
-                        heads=heads,
-                        dim_head=dim_head,
-                        key=keys_resblock[i],
-                    )
-                )
-                i += 1
-            res_blocks.append(
-                ResnetBlock(
-                    dim_in=dim_out + dim_in,
-                    dim_out=dim_in,
-                    is_biggan=is_biggan,
-                    up=False,
-                    down=False,
-                    time_emb_dim=hidden_size,
-                    is_attn=is_attn,
-                    heads=heads,
-                    dim_head=dim_head,
-                    key=keys_resblock[i],
-                )
-            )
-            i += 1
-            if ind < (len(in_out) - 1):
-                res_blocks.append(
-                    ResnetBlock(
-                        dim_in=dim_in,
-                        dim_out=dim_in,
-                        is_biggan=is_biggan,
-                        up=True,
-                        down=False,
-                        time_emb_dim=hidden_size,
-                        is_attn=is_attn,
-                        heads=heads,
-                        dim_head=dim_head,
-                        key=keys_resblock[i],
-                    )
-                )
-                i += 1
-                h, w = h * 2, w * 2
-
-            self.ups_res_blocks.append(res_blocks)
-        assert i == num_keys
-
-        self.final_conv_layers = [
-            eqx.nn.GroupNorm(min(hidden_size // 4, 32), hidden_size),
-            jax.nn.silu,
-            eqx.nn.Conv2d(hidden_size, data_channels - context_size, 1, key=keys[6]),
-        ]
+        keys = jr.split(key, 3*len(features) + 5)
+        self.gfp = GaussianFourierProjection(emb_dim)
+        self.mlp = eqx.nn.MLP(emb_dim, emb_dim, 4 * emb_dim, 1, activation=jax.nn.silu, key=keys[0])
+        self.conv = eqx.nn.Conv(dims, in_channels, features[0], kernel_size=3, padding=1, key=keys[1])
+        self.downblock = []
+        self.upblock = []
+        self.upresblock = []
+        self.downfeatureblock = []
+        self.upfeatureblock = []
+        self.downblockbefore = []
+        self.upblockbefore = []
+        self.downblockafter = []
+        self.upblockafter = []
+        self.upfeatureblock_reduce = []
+        for i in range(len(features)-1):
+            subkeys = jr.split(keys[2 + i], 8 + 2 * (beforeblock_length + afterblock_length))
+            self.downfeatureblock.append(ResnetBlock(dims=dims, in_channels=features[i], out_channels=features[i+1], embed_dim=emb_dim, key=subkeys[1]))
+            self.upfeatureblock.append(ResnetBlock(dims=dims, in_channels= 2*features[i+1], out_channels=features[i+1], embed_dim=emb_dim, key=subkeys[2]))
+            self.upfeatureblock_reduce.append(ResnetBlock(dims=dims, in_channels=features[i+1], out_channels=features[i], embed_dim=emb_dim, key=subkeys[3]))
+            downresblock_before = []
+            upresblock_before = []
+            for j in range(beforeblock_length):
+                key1, key2 = jr.split(subkeys[3 + j])
+                downresblock_before.append(ResnetBlock(dims=dims, in_channels=features[i+1], out_channels=features[i+1], embed_dim=emb_dim, key=key1))
+                upresblock_before.append(ResnetBlock(dims=dims, in_channels=2*features[i+1], out_channels=features[i+1], embed_dim=emb_dim, key=key2))
+            self.downblockbefore.append(downresblock_before)
+            self.upblockbefore.append(upresblock_before)
+            downresblock_after = []
+            upresblock_after = []
+            for j in range(afterblock_length):
+                key1, key2 = jr.split(subkeys[3 + 2*beforeblock_length + j])
+                downresblock_after.append(ResnetBlock(dims=dims, in_channels=features[i+1], out_channels=features[i+1], embed_dim=emb_dim, key=key1))
+                upresblock_after.append(ResnetBlock(dims=dims, in_channels=2*features[i+1], out_channels=features[i+1], embed_dim=emb_dim, key=key2))
+            self.downblockafter.append(downresblock_after)
+            self.upblockafter.append(upresblock_after)
+            self.downblock.append(ResnetBlockDown(dims=dims, in_channels=features[i+1], out_channels=features[i+1], embed_dim=emb_dim, key=subkeys[3 + 2 * (beforeblock_length + afterblock_length) + 2]))
+            self.upblock.append(ResnetBlockUp(dims=dims, in_channels=features[i+1], out_channels=features[i+1], embed_dim=emb_dim, key=subkeys[3 + 2 * (beforeblock_length + afterblock_length) + 3]))
+            self.upresblock.append(ResnetBlock(dims=dims, in_channels= 2*features[i+1], out_channels=features[i+1], embed_dim=emb_dim, key=subkeys[3 + 2 * (beforeblock_length + afterblock_length) + 4]))
+        self.midblock = []
+        midblock_keys = jr.split(keys[2*len(features)+3], midblock_length)
+        for i in range(midblock_length):
+            self.midblock.append(ResnetBlock(dims=dims, in_channels=features[-1], out_channels=features[-1], embed_dim=emb_dim, key=midblock_keys[i]))
+        self.finalblock = []
+        finalblock_keys = jr.split(keys[2*len(features)+4], final_block_length)
+        for i in range(final_block_length):
+            self.finalblock.append(ResnetBlock(dims=dims, in_channels=features[0], out_channels=features[0], embed_dim=emb_dim, key=finalblock_keys[i]))
+        self.resblock = ResnetBlock(dims=dims, in_channels=2*features[0], out_channels=features[0], embed_dim=emb_dim, key=keys[2*len(features)+1])
+        self.block = ConvBlock(dims = dims, in_channels = features[0], out_channels = out_channels, kernel_size=3, key=keys[2*len(features)+2])
     @eqx.filter_jit
-    def __call__(self, t, y, *, key=None):
-        t = self.time_pos_emb(t)
-        t = self.mlp(t)
-        h = self.first_conv(y)
+    def __call__(self, t, y):
+        # Lift 
+        t = self.gfp(t) # 1 -> features[0]
+        t = self.mlp(t) # features[0] -> features[0]
+        h = self.conv(y) # in_channels -> features[0]
+        #Downsample
         hs = [h]
-        for res_blocks in self.down_res_blocks:
-            for res_block in res_blocks:
-                key, subkey = key_split_allowing_none(key)
-                h = res_block(h, t, key=subkey)
+        for i in range(len(self.downblock)):
+            h = self.downfeatureblock[i](t, h) # features[i] -> features[i+1]
+            hs.append(h)
+            for resblock in self.downblockbefore[i]:
+                h = resblock(t, h) # features[i+1] -> features[i+1]
                 hs.append(h)
-
-        key, subkey = key_split_allowing_none(key)
-        h = self.mid_block1(h, t, key=subkey)
-        key, subkey = key_split_allowing_none(key)
-        h = self.mid_block2(h, t, key=subkey)
-
-        for res_blocks in self.ups_res_blocks:
-            for res_block in res_blocks:
-                key, subkey = key_split_allowing_none(key)
-                if res_block.up:
-                    h = res_block(h, t, key=subkey)
-                else:
-                    h = res_block(jnp.concatenate((h, hs.pop()), axis=0), t, key=subkey)
-
-        assert len(hs) == 0
-
-        for layer in self.final_conv_layers:
-            h = layer(h)
+            h = self.downblock[i](t, h) # features[i+1] -> features[i+1]
+            hs.append(h)
+            for resblock in self.downblockafter[i]:
+                h = resblock(t, h) # features[i+1] -> features[i+1]
+                hs.append(h)
+        # Middle Block
+        for i in range(len(self.midblock)):
+            h = self.midblock[i](t, h) # features[-1] -> features[-1]
+        # Upsample
+        for i in range(len(self.upblock)):
+            for resblock in self.upblockafter[-(i+1)]:
+                h = jnp.concatenate((h, hs.pop()), axis=0) 
+                h = resblock(t, h) # 2*features[-(i+1)] -> features[-(i+1)]
+            h = jnp.concatenate((h, hs.pop()), axis=0)
+            h = self.upresblock[-(i+1)](t, h) # 2*features[-(i+1)] -> features[-(i+1)]
+            h = self.upblock[-(i+1)](t, h) # features[-(i+1)] -> features[-(i+1)]
+            for resblock in self.upblockbefore[-(i+1)]:
+                h = jnp.concatenate((h, hs.pop()), axis=0) 
+                h = resblock(t, h) # 2 * features[-(i+1)] -> features[-(i+1)]
+            h = jnp.concatenate((h, hs.pop()), axis=0)
+            h = self.upfeatureblock[-(i+1)](t, h) # 2*features[-(i+1)] -> features[-(i+1)]
+            h = self.upfeatureblock_reduce[-(i+1)](t, h) # features[-(i+1)] -> features[-i]
+        # Projection
+        h = jnp.concatenate((h, hs.pop()), axis=0)
+        h = self.resblock(t, h) # 2 * features[0] -> features[0]
+        for resblock in self.finalblock:
+            h = resblock(t, h) # features[0] -> features[0]
+        # Final Layer 
+        h = self.block(h) # features[0] -> out_channels
         return h

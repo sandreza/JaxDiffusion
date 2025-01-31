@@ -1,11 +1,13 @@
 from jaxdiffusion import *
 from jaxdiffusion.process.sampler import Sampler
+from jaxdiffusion.process.sampler import ODESampler
+from jaxdiffusion.models.unet import UNet
 
 def mnist():
     filename = "train-images-idx3-ubyte.gz"
     url_dir = "https://storage.googleapis.com/cvdf-datasets/mnist"
-    # target_dir = os.getcwd() + "/data/mnist"
-    target_dir = "/orcd/home/001/sandre/Repositories/JaxUvTest/data/mnist"
+    target_dir = os.getcwd() + "/data/mnist"
+    # target_dir = "/orcd/home/001/sandre/Repositories/JaxUvTest/data/mnist"
     url = f"{url_dir}/{filename}"
     target = f"{target_dir}/{filename}"
     if not os.path.exists(target):
@@ -19,7 +21,7 @@ def mnist():
 
 images = mnist() 
 data_mean = jnp.mean(images)
-data_std = jnp.std(images)
+data_std = jnp.std(images) * 2
 data_max = jnp.max(images)
 data_min = jnp.min(images)
 data_shape = images.shape[1:]
@@ -31,9 +33,8 @@ key, subkey = jax.random.split(key)
 random_index_1 = jax.random.randint(key, 10, 0, data.shape[0]-1)
 key, subkey = jax.random.split(key)
 random_index_2 = jax.random.randint(key, 10, 0, data.shape[0]-1)
-
 tmp = jnp.linalg.norm(data[random_index_1, 0, :, :] - data[random_index_2, 0, :, :], axis=(1, 2))
-sigma_max = max(tmp) 
+sigma_max = max(tmp)
 sigma_min = 1e-2
 schedule = VarianceExplodingBrownianMotion(sigma_min, sigma_max) 
 
@@ -41,65 +42,104 @@ seed = 12345
 key, subkey = jax.random.split(key)
 
 unet_hyperparameters = {
-    "data_shape": (1, 28, 28),      # Single-channel grayscale MNIST images
-    "is_biggan": True,              # Whether to use BigGAN architecture
-    "dim_mults": [1, 2, 4],         # Multiplicative factors for UNet feature map dimensions
-    "hidden_size": 32,              # Base hidden channel size
-    "heads": 28,                     # Number of attention heads
-    "dim_head": 28,                 # Size of each attention head
-    "num_res_blocks": 4,            # Number of residual blocks per stage
-    "attn_resolutions": [28, 14]    # Resolutions for applying attention
+    "context_channels": 0,
+    "data_shape": (1, 28, 28),
+    "features": [32, 64],
+    "downscaling_factor": 2,
+    "kernel_size": 3, 
+    "beforeblock_length": 1,
+    "afterblock_length": 1,
+    "final_block_length": 0,
+    "midblock_length": 2,
 }
-
+#beforeblock_length = 0, afterblock_length = 0, midblock_length = 2,
 key = jr.PRNGKey(seed)
-
-model_filename = "mnist_diffusion_unet.mo"
+model_filename = "mnist.mo"
+model_name = UNet
 if os.path.exists(model_filename):
     print("Loading file " + model_filename)
-    model = load(model_filename, UNet)
+    model = load(model_filename, model_name)
     model_hyperparameters = load_hyperparameters(model_filename)
     print("Done Loading model with hyperparameters")
     print(model_hyperparameters)
 else:
-    print("File test_save.mo does not exist. Creating UNet")
-    model = UNet(key = key, **unet_hyperparameters)
+    print("File does not exist. Creating UNet")
+    model = model_name(key = key, **unet_hyperparameters)
     print("Done Creating UNet")
 
-# Optimisation hyperparameters
-num_steps= 100000
-lr=3e-4
-batch_size = 32*4
-print_every=100
+# Training
+lr=1e-3
 # Seed
 seed=5678
-opt = optax.adam(lr)
+opt = optax.chain(
+    optax.adam(lr),
+)
 # Optax will update the floating-point JAX arrays in the model.
 opt_state = opt.init(eqx.filter(model, eqx.is_inexact_array))
 
 model_key, train_key, loader_key, sample_key = jr.split(key, 4) 
+# Train Test Split
+test_size = 0.2
+dataset_size = data.shape[0]
+indices = jnp.arange(dataset_size)
+perm = jax.random.permutation(subkey, indices)
+test_size = int(dataset_size * test_size)
+train_size = dataset_size - test_size
+train_indices = perm[:train_size]
+test_indices = perm[train_size:]
+train_data = data[train_indices, :, :, :]
+test_data = data[test_indices, :, :, :]
 
+_, subkey, subkey2 = jax.random.split(subkey, 3)
+train_size = train_data.shape[0]
+test_size = test_data.shape[0]
+batch_size = 32 * 4
+train_skip_size = train_size // batch_size
+test_skip_size = test_size // batch_size
+
+# Training
+model_key, train_key, test_key, loader_key, sample_key = jr.split(key, 5) 
 total_value = 0
 total_size = 0
-for step, data in zip(
-    range(num_steps), dataloader(data, batch_size, key=loader_key)
-):
-    value, model, train_key, opt_state = make_step(
-        model, schedule, data, train_key, opt_state, opt.update
-    )
-    total_value += value.item()
-    total_size += 1
-    if (step % print_every) == 0 or step == num_steps - 1:
-        print(f"Step={step} Loss={total_value / total_size}")
-        total_value = 0
-        total_size = 0
-        save(model_filename, unet_hyperparameters, model)
+test_value = 0
+total_test_size = 0
+losses = []
+test_losses = []
+epochs = 200
+
+for epoch in range(epochs):
+    _, subkey, subkey2, subkey3 = jax.random.split(subkey, 4)
+    perm_train = jax.random.permutation(subkey, train_size)
+    perm_test  = jax.random.permutation(subkey2, test_size)
+    for chunk in range(train_skip_size-1):
+        _, train_key = jax.random.split(train_key)
+        tr_data = train_data[perm_train[chunk*batch_size:(chunk+1)*batch_size], :, :, :]
+        value, model, train_key, opt_state = make_step(
+            model, schedule, tr_data, train_key, opt_state, opt.update
+        )
+        total_value += value.item()
+        total_size += 1
+    for chunk in range(test_skip_size-1):
+        _, test_key = jax.random.split(test_key)
+        tst_data = test_data[perm_test[chunk*batch_size:(chunk+1)*batch_size], :, :, :]
+        test_value += batch_loss_function(model, schedule, tst_data, test_key)
+        total_test_size += 1
+    print(f"------Epoch={epoch}------")
+    print(f"Loss={total_value / total_size}")
+    print(f"Test Loss={test_value / total_test_size}")
+    total_value = 0
+    total_size = 0
+    test_value = 0
+    total_test_size = 0
+    save(model_filename, unet_hyperparameters, model)
 
 save(model_filename, unet_hyperparameters, model)
 # Sampling
+_, _, subkey = jax.random.split(subkey, 3)
 data_shape = data[0, :, :, :].shape
 sampler = Sampler(schedule, model, data_shape)
 sqrt_N = 10
-samples = sampler.sample(sqrt_N**2)
+samples = sampler.sample(sqrt_N**2, key = subkey, steps = 300)
 
 # plotting
 sample = jnp.reshape(samples, (sqrt_N, sqrt_N, 28, 28))
@@ -113,5 +153,26 @@ plt.imshow(sample, cmap="Greys")
 plt.axis("off")
 plt.tight_layout()
 plt.show()
-filename = "mnist_diffusion_unet.png"
+filename = model_filename[0:-3] + "_sde.png"
+plt.savefig(filename)
+
+_, _, subkey = jax.random.split(subkey, 3)
+data_shape = data[0, :, :, :].shape
+sampler = ODESampler(schedule, model, data_shape)
+sqrt_N = 10
+samples = sampler.sample(sqrt_N**2, key = subkey, steps = 10)
+
+# plotting
+sample = jnp.reshape(samples, (sqrt_N, sqrt_N, 28, 28))
+sample = jnp.transpose(sample, (0, 2, 1, 3))
+sample = jnp.reshape(sample, (sqrt_N * 28, sqrt_N * 28))
+sample = data_mean + data_std * sample
+sample = jnp.clip(sample, data_min, data_max)
+
+plt.figure()
+plt.imshow(sample, cmap="Greys")
+plt.axis("off")
+plt.tight_layout()
+plt.show()
+filename = model_filename[0:-3] + "_ode.png"
 plt.savefig(filename)
