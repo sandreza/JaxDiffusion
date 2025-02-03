@@ -268,3 +268,81 @@ class UNet(eqx.Module):
         # Final Layer 
         h = self.block(h)       # features[0] -> out_channels
         return h
+
+class SimpleUNet(eqx.Module):
+    gfp: GaussianFourierProjection
+    mlp: eqx.nn.MLP
+    conv: eqx.nn.Conv
+    downblock: list[ResnetBlockDown]
+    upblock: list[ResnetBlockUp]
+    upresblock: list[ResnetBlock]
+    midblock: list[ResnetBlock]
+    resblock: ResnetBlock
+    block: ConvBlock
+    def __init__(self, *, context_channels=0, beforeblock_length = 0, padding_mode = 'REPLICATE',  afterblock_length = 0, midblock_length = 2, final_block_length = 0, kernel_size = 3, data_shape, features=[32, 64, 128], downscaling_factor=2, key=jr.PRNGKey(0)):
+        in_channels = data_shape[0]
+        out_channels = in_channels - context_channels
+        dims = len(data_shape) - 1
+        padding_mode_up = 'ZEROS'
+        if padding_mode == 'CIRCULAR': 
+            padding_mode_up = 'CIRCULAR'
+        emb_dim = features[0]
+        min_group_norm = features[0]
+        keys = jr.split(key, 12)
+        if type(kernel_size) == int:
+            kernel_size = [kernel_size for _ in features]
+        assert len(kernel_size) == len(features), "Kernel size must be the same length as feature factors"
+        if type(downscaling_factor) == int:
+            downscaling_factors = [downscaling_factor]
+            for i in range(len(features)-2):
+                downscaling_factors.append(downscaling_factor)
+        assert (len(downscaling_factors)+1) == len(features), "Downscaling factors must be one less than feature factors"
+        data_shapes = [data_shape]
+        for i in range(len(features)-2):
+            data_shapes.append(tuple([features[i]] + [(x + downscaling_factors[i] - 1 ) // downscaling_factors[i] for x in data_shapes[i][1:]]))
+        data_shapes = data_shapes[::-1]
+
+        keys = jr.split(key, 3*len(features) + 5)
+        self.gfp = GaussianFourierProjection(emb_dim)
+        self.mlp = eqx.nn.MLP(emb_dim, emb_dim, 4 * emb_dim, 1, activation=jax.nn.silu, key=keys[0])
+        padding = smoothing_padding(dims, kernel_size[0])
+        self.conv = eqx.nn.Conv(dims, in_channels, features[0], kernel_size=kernel_size[0], padding=padding, padding_mode = padding_mode, key=keys[1])
+        self.downblock = []
+        self.upblock = []
+        self.upresblock = []
+        for i in range(len(features)-1):
+            subkeys = jr.split(keys[2 + i], 8 + 2 * (beforeblock_length + afterblock_length))
+            self.downblock.append(ResnetBlockDown(dims=dims, kernel_size = kernel_size[i+1], padding_mode = padding_mode, in_channels=features[i], out_channels=features[i+1], embed_dim=emb_dim, key=subkeys[3 + 2 * (beforeblock_length + afterblock_length) + 2]))
+            self.upblock.append(ResnetBlockUp(dims=dims, kernel_size = kernel_size[i+1], padding_mode = padding_mode, padding_mode_up = padding_mode_up, in_channels=features[i+1], out_channels=features[i], embed_dim=emb_dim, key=subkeys[3 + 2 * (beforeblock_length + afterblock_length) + 3]))
+            self.upresblock.append(ResnetBlock(dims=dims, kernel_size = kernel_size[i+1], padding_mode = padding_mode, in_channels= 2*features[i+1], out_channels=features[i+1], embed_dim=emb_dim, key=subkeys[3 + 2 * (beforeblock_length + afterblock_length) + 4]))
+        self.midblock = []
+        midblock_keys = jr.split(keys[2*len(features)+3], midblock_length)
+        for i in range(midblock_length):
+            self.midblock.append(ResnetBlock(dims=dims, kernel_size = kernel_size[0], padding_mode = padding_mode, in_channels=features[-1], out_channels=features[-1], embed_dim=emb_dim, key=midblock_keys[i]))
+        self.resblock = ResnetBlock(dims=dims, kernel_size = kernel_size[0], padding_mode = padding_mode, in_channels=2*features[0], out_channels=features[0], embed_dim=emb_dim, key=keys[2*len(features)+1])
+        self.block = ConvBlock(dims = dims, kernel_size = kernel_size[0], padding_mode = padding_mode, in_channels = features[0], out_channels = out_channels, key=keys[2*len(features)+2])
+    @eqx.filter_jit
+    def __call__(self, t, y):
+        # Lift 
+        t = self.gfp(t)  # 1 -> features[0]
+        t = self.mlp(t)  # features[0] -> features[0]
+        h = self.conv(y) # in_channels -> features[0]
+        #Downsample
+        hs = [h]
+        for i in range(len(self.downblock)):
+            h = self.downblock[i](t, h)        # features[i] -> features[i+1]
+            hs.append(h)
+        # Middle Block
+        for i in range(len(self.midblock)):
+            h = self.midblock[i](t, h)         # features[-1] -> features[-1]
+        # Upsample
+        for i in range(len(self.upblock)):
+            h = jnp.concatenate((h, hs.pop()), axis=0)
+            h = self.upresblock[-(i+1)](t, h)            # 2*features[-(i+1)] -> features[-(i+1)]
+            h = self.upblock[-(i+1)](t, h)               # features[-(i+1)] -> features[-i]
+        # Projection
+        h = jnp.concatenate((h, hs.pop()), axis=0)
+        h = self.resblock(t, h) # 2 * features[0] -> features[0]
+        # Final Layer 
+        h = self.block(h)       # features[0] -> out_channels
+        return h

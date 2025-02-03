@@ -45,8 +45,8 @@ def conditional_single_loss_function(model, context_size, std, data, t, key):
     y = jnp.copy(data)
     y = y.at[:-context_size, ...].add(std * noise)
     
-    pred = model(t, y) / std
-    return jnp.mean((pred * std + noise) ** 2)
+    pred = model(t, y) # score = model(t, y) / sigma
+    return jnp.mean((pred + noise) ** 2)
 
 @eqx.filter_jit
 def conditional_batch_loss_function(model, context_size, schedule, data, key):
