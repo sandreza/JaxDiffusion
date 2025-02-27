@@ -1,7 +1,8 @@
 from jaxdiffusion import *
-from jaxdiffusion.process.sampler import Sampler
-from jaxdiffusion.process.sampler import ODESampler
-from jaxdiffusion.models.unet import UNet
+from jaxdiffusion.process.residual_sampler import ResidualSampler
+from jaxdiffusion.process.residual_sampler import ResidualODESampler
+from jaxdiffusion.models.unet import SimpleUNet
+from jaxdiffusion.losses.residual_loss import residual_conditional_make_step, residual_conditional_batch_loss_function
 
 def mnist():
     image_filename = "train-images-idx3-ubyte.gz"
@@ -75,14 +76,10 @@ seed = 12345
 data_shape = conditional_data.shape[1:]
 context_channels = 1
 unet_hyperparameters = {
-    "context_channels": 0,
     "data_shape": data_shape,
     "features": [32, 64],
     "downscaling_factor": 2,
-    "kernel_size": [5, 3], 
-    "beforeblock_length": 1,
-    "afterblock_length": 1,
-    "final_block_length": 0,
+    "kernel_size": [3, 3], 
     "midblock_length": 2,
     "context_channels": context_channels, 
 }
@@ -90,16 +87,16 @@ unet_hyperparameters = {
 key = jr.PRNGKey(seed)
 key, unet_key, subkey = jax.random.split(key, 3)
 
-model_filename = "mnist_conditional_diffusion_unet.mo"
+model_filename = "simple_mnist_conditional_diffusion_unet_residual.mo"
 if os.path.exists(model_filename):
     print("Loading file " + model_filename)
-    model = load(model_filename, UNet)
+    model = load(model_filename, SimpleUNet)
     model_hyperparameters = load_hyperparameters(model_filename)
     print("Done Loading model with hyperparameters")
     print(model_hyperparameters)
 else:
-    print("File test_save.mo does not exist. Creating UNet")
-    model = UNet(key = key, **unet_hyperparameters)
+    print("File " + model_filename + " does not exist. Creating UNet")
+    model = SimpleUNet(key = key, **unet_hyperparameters)
     print("Done Creating UNet")
 
 # Train Test Split
@@ -132,7 +129,7 @@ test_value = 0
 total_test_size = 0
 losses = []
 test_losses = []
-epochs = 100
+epochs = 30
 for epoch in range(epochs):
     _, subkey, subkey2, subkey3 = jax.random.split(subkey, 4)
     perm_train = jax.random.permutation(subkey, train_size)
@@ -140,7 +137,7 @@ for epoch in range(epochs):
     for chunk in range(train_skip_size-1):
         _, train_key = jax.random.split(train_key)
         tr_data = train_data[perm_train[chunk*batch_size:(chunk+1)*batch_size], :, :, :]
-        value, model, train_key, opt_state = conditional_make_step(
+        value, model, train_key, opt_state = residual_conditional_make_step(
             model, context_channels, schedule, tr_data, train_key, opt_state, opt.update
         )
         total_value += value.item()
@@ -148,7 +145,7 @@ for epoch in range(epochs):
     for chunk in range(test_skip_size-1):
         _, test_key = jax.random.split(test_key)
         tst_data = test_data[perm_test[chunk*batch_size:(chunk+1)*batch_size], :, :, :]
-        test_value += conditional_batch_loss_function(model, context_channels, schedule, tst_data, test_key)
+        test_value += residual_conditional_batch_loss_function(model, context_channels, schedule, tst_data, test_key)
         total_test_size += 1
     print(f"------Epoch={epoch}------")
     print(f"Loss={total_value / total_size}")
@@ -181,7 +178,7 @@ for ii in range(10):
     # Sampling
     print("Sampling " + str(labels[context_ind]))
     data_shape = conditional_data[0, 0:1, :, :].shape
-    sampler = Sampler(schedule, context_model, data_shape)
+    sampler = ResidualSampler(schedule, context_model, data_shape)
     sqrt_N = 10
     samples = sampler.sample(sqrt_N**2, steps = 300)
     print("Done Sampling, Now Plotting")
@@ -207,7 +204,7 @@ for ii in range(10):
                 axes[j, i].axis("off")
     plt.tight_layout()
     plt.show()
-    filename = "mnist_diffusion_unet_with_context_" + str(labels[context_ind]) + "_sde.png"
+    filename = "simple_residual_mnist_diffusion_unet_with_context_" + str(labels[context_ind]) + "_sde.png"
     plt.savefig(filename)
 
 
@@ -220,9 +217,9 @@ for ii in range(10):
     # Sampling
     print("Sampling " + str(labels[context_ind]))
     data_shape = conditional_data[0, 0:1, :, :].shape
-    sampler = ODESampler(schedule, context_model, data_shape)
+    sampler = ResidualODESampler(schedule, context_model, data_shape)
     sqrt_N = 10
-    samples = sampler.sample(sqrt_N**2, steps = 300)
+    samples = sampler.sample(sqrt_N**2, steps = 10)
     print("Done Sampling, Now Plotting")
     # plotting
     sample = jnp.reshape(samples, (sqrt_N, sqrt_N, 28, 28))
@@ -246,5 +243,5 @@ for ii in range(10):
                 axes[j, i].axis("off")
     plt.tight_layout()
     plt.show()
-    filename = "mnist_diffusion_unet_with_context_" + str(labels[context_ind]) + "_ode.png"
+    filename = "simple_residual_mnist_diffusion_unet_with_context_" + str(labels[context_ind]) + "_ode.png"
     plt.savefig(filename)
