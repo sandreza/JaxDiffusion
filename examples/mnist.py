@@ -6,8 +6,7 @@ from jaxdiffusion.models.unet import UNet
 def mnist():
     filename = "train-images-idx3-ubyte.gz"
     url_dir = "https://storage.googleapis.com/cvdf-datasets/mnist"
-    # target_dir = os.getcwd() + "/data/mnist"
-    target_dir = "/orcd/home/001/sandre/Repositories/JaxUvTest/data/mnist"
+    target_dir = os.getcwd() + "/data/mnist"
     url = f"{url_dir}/{filename}"
     target = f"{target_dir}/{filename}"
     if not os.path.exists(target):

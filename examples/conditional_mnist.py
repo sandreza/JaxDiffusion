@@ -8,8 +8,7 @@ def mnist():
     image_filename = "train-images-idx3-ubyte.gz"
     label_filename = "train-labels-idx1-ubyte.gz"
     url_dir = "https://storage.googleapis.com/cvdf-datasets/mnist"
-    # target_dir = os.getcwd() + "/data/mnist"
-    target_dir = "/orcd/home/001/sandre/Repositories/JaxUvTest/data/mnist"
+    target_dir = os.getcwd() + "/data/mnist"
 
     # Download image data
     image_url = f"{url_dir}/{image_filename}"
@@ -219,7 +218,7 @@ for ii in range(10):
     data_shape = conditional_data[0, 0:1, :, :].shape
     sampler = ResidualODESampler(schedule, context_model, data_shape)
     sqrt_N = 10
-    samples = sampler.sample(sqrt_N**2, steps = 10)
+    samples = sampler.sample(sqrt_N**2, steps = 6)
     print("Done Sampling, Now Plotting")
     # plotting
     sample = jnp.reshape(samples, (sqrt_N, sqrt_N, 28, 28))
