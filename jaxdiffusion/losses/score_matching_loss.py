@@ -8,7 +8,8 @@ import functools as ft
 def single_loss_function(model, std, data, t, key):
     noise = jr.normal(key, data.shape)
     y = data + std * noise
-    nn = model(t, y)  # score = model(t, y) / sigma, but in loss its score * sigma
+    scaling = 1 + std
+    nn = model(t, y / scaling)  # score = model(t, y) / sigma, but in loss its score * sigma
     return jnp.mean((nn + noise) ** 2) # sigma cancels out 
 
 @eqx.filter_jit
@@ -19,7 +20,8 @@ def batch_loss_function(model, schedule, data, key):
 
     t0 = schedule.tmin
     t1 = jnp.array([1.0])
-    t = jr.uniform(tkey, (batch_size,), minval=t0, maxval=t1)
+    t = jr.uniform(tkey, (batch_size,), minval=0, maxval=1)
+    t = t0 + (t1 - t0) * t
     sigmas = jax.vmap(schedule.sigma)(t)
 
     loss_function = ft.partial(single_loss_function, model)
@@ -30,7 +32,7 @@ def batch_loss_function(model, schedule, data, key):
 def make_step(model, schedule, data, key, opt_state, opt_update):
     loss_function = eqx.filter_value_and_grad(batch_loss_function)
     loss, grads = loss_function(model, schedule, data, key)
-    updates, opt_state = opt_update(grads, opt_state)
+    updates, opt_state = opt_update(grads, opt_state, model)
     model = eqx.apply_updates(model, updates)
     key = jr.split(key, 1)[0]
     return loss, model, key, opt_state
@@ -44,6 +46,8 @@ def conditional_single_loss_function(model, context_size, std, data, t, key):
     noise = jr.normal(key, data_shape)
     y = jnp.copy(data)
     y = y.at[:-context_size, ...].add(std * noise)
+    scaling = 1 + std
+    y = y.at[:-context_size, ...].divide(scaling)
     
     pred = model(t, y) # score = model(t, y) / sigma
     return jnp.mean((pred + noise) ** 2)
@@ -56,7 +60,8 @@ def conditional_batch_loss_function(model, context_size, schedule, data, key):
 
     t0 = schedule.tmin
     t1 = jnp.array([1.0])
-    t = jr.uniform(tkey, (batch_size,), minval=t0, maxval=t1)
+    t = jr.uniform(tkey, (batch_size,), minval=0, maxval=1)
+    t = t0 + (t1 - t0) * t
     sigmas = jax.vmap(schedule.sigma)(t)
 
     loss_function = ft.partial(conditional_single_loss_function, model, context_size)
@@ -67,7 +72,7 @@ def conditional_batch_loss_function(model, context_size, schedule, data, key):
 def conditional_make_step(model, context_size, schedule, data, key, opt_state, opt_update):
     loss_function = eqx.filter_value_and_grad(conditional_batch_loss_function)
     loss, grads = loss_function(model, context_size, schedule, data, key)
-    updates, opt_state = opt_update(grads, opt_state)
+    updates, opt_state = opt_update(grads, opt_state, model)
     model = eqx.apply_updates(model, updates)
     key = jr.split(key, 1)[0]
     return loss, model, key, opt_state

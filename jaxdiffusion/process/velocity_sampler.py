@@ -14,14 +14,32 @@ import functools as ft
 import jax.random as jr
 import lineax as lx
 
-class ResidualSampler:
+class VelocitySampler:
     def __init__(self, schedule, model, data_shape):
         @eqx.filter_jit
         def drift_precursor(model, schedule, t, y, args):
             g2 = schedule.g2(t)
-            scaling = 1 + schedule.sigma(t)
-            prefactor = g2  / (schedule.sigma(t)**2)
-            scaled_score = model(t, y / scaling, None)- y
+            sigma =  schedule.sigma(t)
+            scaling = 1 + sigma
+            # score(y) = -y / std**2 * alpha + beta * nn(y / scaling) / (std**2)
+            # score(data + std * noise) = - data / std**2 * alpha - noise / std *alpha + ... 
+            # loss = -data/std**2 * alpha  + (1-alpha) * Z / std + beta * nn / std**2 
+            # weight = std**2 / beta
+            # weight * loss = -data *alpha/beta + (1-alpha)/beta * std* Z + nn 
+            # alpha -> 0 as std -> 0, alpha -> 1 as std -> inf
+            # beta -> O(std) as std -> 0, beta -> O(1) as std -> inf
+            # alpha = std / (1 + std), beta = std / (1 + std)
+            # 1 - alpha = 1 / (1 + std)
+            # w1 = alpha / beta 
+            # w2 = (1 - alpha) / beta * std
+            # weight * loss = -data * w1 + Z * w2 + nn
+            # weight * loss = -data + Z  + nn
+            # weight(t) = std**2 / (1 + std)
+            prefactor = g2 / (sigma**2)
+            alpha = sigma / (1 + sigma)
+            beta = sigma / (1 + sigma)
+            tau = jnp.log(sigma) / 4
+            scaled_score = - y * alpha + beta * model(tau , y / scaling, None) 
             s = - prefactor * scaled_score
             return s
         
@@ -64,14 +82,33 @@ class ResidualSampler:
         samples = jnp.reshape(samples, (N,  *self.data_shape))
         return samples
     
-class ResidualODESampler:
+
+class VelocityODESampler:
     def __init__(self, schedule, model, data_shape, * , solver = dfx.Heun()):
         @eqx.filter_jit
         def drift_precursor(model, schedule, t, y, args):
             g2 = schedule.g2(t)
-            scaling = 1 + schedule.sigma(t)
-            prefactor = g2  / (2 * schedule.sigma(t)**2)
-            scaled_score = model(t, y / scaling, None) - y
+            sigma =  schedule.sigma(t)
+            scaling = 1 + sigma
+            # score(y) = -y / std**2 * alpha + beta * nn(y / scaling) / (std**2)
+            # score(data + std * noise) = - data / std**2 * alpha - noise / std *alpha + ... 
+            # loss = -data/std**2 * alpha  + (1-alpha) * Z / std + beta * nn / std**2 
+            # weight = std**2 / beta
+            # weight * loss = -data *alpha/beta + (1-alpha)/beta * std* Z + nn 
+            # alpha -> 0 as std -> 0, alpha -> 1 as std -> inf
+            # beta -> O(std) as std -> 0, beta -> O(1) as std -> inf
+            # alpha = std / (1 + std), beta = std / (1 + std)
+            # 1 - alpha = 1 / (1 + std)
+            # w1 = alpha / beta 
+            # w2 = (1 - alpha) / beta * std
+            # weight * loss = -data * w1 + Z * w2 + nn
+            # weight * loss = -data + Z + nn
+            # weight(t) = std**2 / (1 + std)
+            prefactor = g2 / (2 * sigma**2)
+            alpha = sigma / (1 + sigma)
+            beta = sigma / (1 + sigma)
+            tau = jnp.log(sigma) / 4
+            scaled_score = - y * alpha + beta * model(tau, y / scaling, None) 
             s = - prefactor * scaled_score
             return s
         
